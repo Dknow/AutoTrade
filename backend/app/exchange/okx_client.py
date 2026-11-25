@@ -21,6 +21,22 @@ from app.exchange.rate_limiter import RateLimiter
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
+def _error_message(payload: Mapping[str, Any]) -> str:
+    """拼接顶层 msg 与逐条明细（sCode/sMsg），交易被拒时缺少明细几乎无法定位。"""
+    message = str(payload.get("msg", ""))
+    details: list[str] = []
+    for item in payload.get("data") or []:
+        if not isinstance(item, Mapping):
+            continue
+        sub_code = str(item.get("sCode") or "")
+        sub_msg = str(item.get("sMsg") or "")
+        if sub_code and sub_code != "0":
+            details.append(f"{sub_code}: {sub_msg}")
+    if details:
+        message = f"{message} | " + "; ".join(details)
+    return message
+
+
 class OkxAPIError(RuntimeError):
     def __init__(
         self,
@@ -204,7 +220,7 @@ class OkxClient:
             if code != "0":
                 raise OkxAPIError(
                     code,
-                    str(payload.get("msg", "")),
+                    _error_message(payload),
                     endpoint=request_path,
                     http_status=response.status_code,
                 )
@@ -309,12 +325,18 @@ class OkxClient:
             body["reduceOnly"] = True
         if cl_ord_id:
             body["clOrdId"] = cl_ord_id
-        if tp_trigger_px is not None:
-            body["tpTriggerPx"] = str(tp_trigger_px)
-            body["tpOrdPx"] = str(tp_ord_px) if tp_ord_px is not None else "-1"
-        if sl_trigger_px is not None:
-            body["slTriggerPx"] = str(sl_trigger_px)
-            body["slOrdPx"] = str(sl_ord_px) if sl_ord_px is not None else "-1"
+        # OKX 已下线顶层 tpTriggerPx/slTriggerPx（错误码 54070），必须走 attachAlgoOrds
+        if tp_trigger_px is not None or sl_trigger_px is not None:
+            algo: dict[str, Any] = {}
+            if tp_trigger_px is not None:
+                algo["tpTriggerPx"] = str(tp_trigger_px)
+                algo["tpOrdPx"] = str(tp_ord_px) if tp_ord_px is not None else "-1"
+                algo["tpTriggerPxType"] = "last"
+            if sl_trigger_px is not None:
+                algo["slTriggerPx"] = str(sl_trigger_px)
+                algo["slOrdPx"] = str(sl_ord_px) if sl_ord_px is not None else "-1"
+                algo["slTriggerPxType"] = "last"
+            body["attachAlgoOrds"] = [algo]
 
         data = await self._request("POST", "/api/v5/trade/order", json_body=body, auth=True)
         return data[0] if data else {}
@@ -367,6 +389,59 @@ class OkxClient:
         if pos_side:
             body["posSide"] = pos_side
         return await self._request("POST", "/api/v5/trade/close-position", json_body=body, auth=True)
+
+    async def amend_order(
+        self,
+        *,
+        inst_id: str,
+        ord_id: str | None = None,
+        cl_ord_id: str | None = None,
+        new_sz: str | None = None,
+        new_px: str | None = None,
+    ) -> dict:
+        body: dict[str, Any] = {"instId": inst_id}
+        if ord_id:
+            body["ordId"] = ord_id
+        elif cl_ord_id:
+            body["clOrdId"] = cl_ord_id
+        else:
+            raise ValueError("改单必须提供 ord_id 或 cl_ord_id")
+        if new_sz is not None:
+            body["newSz"] = str(new_sz)
+        if new_px is not None:
+            body["newPx"] = str(new_px)
+        if len(body) <= 2:
+            raise ValueError("改单至少要修改数量或价格")
+        data = await self._request("POST", "/api/v5/trade/amend-order", json_body=body, auth=True)
+        return data[0] if data else {}
+
+    async def get_orders(
+        self,
+        *,
+        inst_type: str = "SWAP",
+        inst_id: str | None = None,
+    ) -> list[dict]:
+        data = await self._request(
+            "GET",
+            "/api/v5/trade/orders-pending",
+            params={"instType": inst_type, "instId": inst_id or ""},
+            auth=True,
+        )
+        return [item for item in data if isinstance(item, dict)]
+
+    async def set_leverage(
+        self,
+        *,
+        inst_id: str,
+        lever: str,
+        mgn_mode: str = "cross",
+        pos_side: str | None = None,
+    ) -> dict:
+        body: dict[str, Any] = {"instId": inst_id, "lever": str(lever), "mgnMode": mgn_mode}
+        if pos_side:
+            body["posSide"] = pos_side
+        data = await self._request("POST", "/api/v5/account/set-leverage", json_body=body, auth=True)
+        return data[0] if data else {}
 
 
 def create_okx_client_from_settings(settings: Any) -> OkxClient:

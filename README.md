@@ -2,7 +2,7 @@
 
 基于 OKX v5 官方接口的 USDT 本位永续合约自动化交易系统（双向持仓模式）。
 
-当前进度：**P0 - 接入验证**（脚手架、OKX 客户端、冒烟测试、最小前端）。
+当前进度：**P2 - 交易执行引擎**（开仓/平仓/撤改单/止盈止损，模拟盘闭环已验证）。
 
 ## 技术栈
 
@@ -19,10 +19,11 @@
 AutoTrade/
 ├── backend/
 │   ├── app/
-│   │   ├── api/routes/       # HTTP 路由（health、交易所自检）
+│   │   ├── api/routes/       # HTTP 路由（health、market、trade）
 │   │   ├── core/config.py    # 配置（从 backend/.env 读取）
 │   │   ├── db/session.py     # SQLAlchemy 引擎与会话
-│   │   ├── exchange/         # OKX 客户端、签名、限频
+│   │   ├── exchange/         # OKX 客户端、签名、限频、WS
+│   │   ├── services/         # 行情、账户、合约规格、交易执行
 │   │   └── main.py           # FastAPI 入口
 │   ├── tests/                # 签名/Mock/公共接口/私有接口测试
 │   ├── requirements.txt
@@ -76,8 +77,27 @@ cd backend
 | `GET /api/v1/market/snapshot` | 行情快照（ticker + 最近 200 根 K 线） |
 | `GET /api/v1/market/candles?bar=1m&limit=200` | 历史 K 线 |
 | `WS /api/v1/ws/stream` | 实时推送：`snapshot` / `ticker` / `candle` / `positions` / `orders` |
+| `GET /api/v1/trade/instruments` | USDT 本位永续合约规格（面值/步长/精度/最大杠杆） |
+| `POST /api/v1/trade/instruments/refresh` | 刷新合约规格缓存 |
+| `POST /api/v1/trade/orders` | 开仓（`pos_side=long/short`，可附带止盈止损） |
+| `POST /api/v1/trade/orders/{ord_id}/cancel` | 撤单 |
+| `POST /api/v1/trade/orders/{ord_id}/amend` | 改单（改量或改价） |
+| `POST /api/v1/trade/positions/close` | 平仓（`size` 留空为市价全平，`autoCxl` 自动撤止盈止损） |
+| `POST /api/v1/trade/leverage` | 设置杠杆（双向持仓需带 `pos_side`） |
+| `GET /api/v1/trade/orders/pending` | 当前未成交挂单 |
 
 私有频道（持仓、订单、账户）只在配置 OKX 凭据后启动，否则自动跳过。
+
+### 双向持仓下单规则
+
+| 动作 | side | posSide | 附加 |
+|---|---|---|---|
+| 开多 | `buy` | `long` | — |
+| 开空 | `sell` | `short` | — |
+| 平多 | `sell` | `long` | `reduceOnly=true` |
+| 平空 | `buy` | `short` | `reduceOnly=true` |
+
+止盈止损通过 `attachAlgoOrds` 数组下发（顶层 `tpTriggerPx` 已下线，会返回 54070）。
 
 ## 配置说明（backend/.env）
 
@@ -148,8 +168,8 @@ cd frontend; npm run build
 ## 路线图
 
 - [x] P0 脚手架 + OKX 客户端 + 冒烟测试
-- [x] P1 WebSocket 行情与私有频道（私有频道待模拟盘凭据验证）
-- [ ] P2 交易执行引擎（双向持仓）
+- [x] P1 WebSocket 行情与私有频道（模拟盘凭据已验证）
+- [x] P2 交易执行引擎（双向持仓，开多→止盈止损→全平闭环已验证）
 - [ ] P3 策略引擎 + 风控熔断
 - [ ] P4 完整可视化界面
 - [ ] P5 回测与部署文档

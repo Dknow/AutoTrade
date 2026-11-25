@@ -30,6 +30,13 @@ type Position = {
   mgnMode: string;
 };
 
+type InstrumentSpec = {
+  minSz: string;
+  lotSz: string;
+  tickSz: string;
+  maxLever: string;
+};
+
 type StreamMessage = {
   type: string;
   data?: unknown;
@@ -37,6 +44,9 @@ type StreamMessage = {
   account?: { enabled?: boolean; positions?: Position[] };
 };
 
+type Notice = { ok: boolean; text: string };
+
+const INST_ID = "BTC-USDT-SWAP";
 const WS_URL = `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/api/v1/ws/stream`;
 
 function toCandle(row: string[]): CandlestickData<UTCTimestamp> {
@@ -54,6 +64,20 @@ function fmt(value: string | undefined, digits = 2): string {
   return Number.isFinite(num) ? num.toFixed(digits) : "-";
 }
 
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(`/api/v1${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const detail = (data as { detail?: { message?: string; code?: string } }).detail;
+    throw new Error(detail?.message ?? detail?.code ?? `请求失败 (HTTP ${response.status})`);
+  }
+  return data as T;
+}
+
 export default function App() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -64,6 +88,29 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [accountEnabled, setAccountEnabled] = useState(false);
   const [positions, setPositions] = useState<Position[]>([]);
+
+  const [spec, setSpec] = useState<InstrumentSpec | null>(null);
+  const [ordType, setOrdType] = useState<"limit" | "market">("limit");
+  const [price, setPrice] = useState("");
+  const [size, setSize] = useState("");
+  const [lever, setLever] = useState("10");
+  const [tp, setTp] = useState("");
+  const [sl, setSl] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<Notice | null>(null);
+
+  useEffect(() => {
+    fetch("/api/v1/trade/instruments")
+      .then((res) => res.json())
+      .then((data: { specs?: Record<string, InstrumentSpec> }) => {
+        const item = data.specs?.[INST_ID];
+        if (item) {
+          setSpec(item);
+          setSize((current) => current || item.minSz);
+        }
+      })
+      .catch(() => setNotice({ ok: false, text: "合约规格加载失败，交易功能暂不可用" }));
+  }, []);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -171,6 +218,58 @@ export default function App() {
     ? ((Number(ticker.last) - Number(ticker.open_24h)) / Number(ticker.open_24h)) * 100
     : 0;
 
+  const openPosition = async (posSide: "long" | "short") => {
+    if (busy) return;
+    const quantity = Number(size);
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      setNotice({ ok: false, text: "请填写有效的下单张数" });
+      return;
+    }
+    const limitPrice = Number(price || ticker?.last || 0);
+    if (ordType === "limit" && limitPrice <= 0) {
+      setNotice({ ok: false, text: "限价单需要有效价格" });
+      return;
+    }
+    setBusy(true);
+    setNotice(null);
+    try {
+      await postJson("/trade/orders", {
+        inst_id: INST_ID,
+        pos_side: posSide,
+        size: quantity,
+        ord_type: ordType,
+        price: ordType === "limit" ? limitPrice : null,
+        lever: Number(lever) > 0 ? Number(lever) : null,
+        tp_trigger_px: tp ? Number(tp) : null,
+        sl_trigger_px: sl ? Number(sl) : null,
+      });
+      setNotice({ ok: true, text: `${posSide === "long" ? "开多" : "开空"} ${quantity} 张已提交` });
+    } catch (error) {
+      setNotice({ ok: false, text: (error as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const closePosition = async (posSide: string) => {
+    if (busy) return;
+    if (!window.confirm(`确认平掉 ${INST_ID} 的${posSide === "long" ? "多" : "空"}仓？`)) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      await postJson("/trade/positions/close", {
+        inst_id: INST_ID,
+        pos_side: posSide,
+        ord_type: "market",
+      });
+      setNotice({ ok: true, text: "平仓已提交" });
+    } catch (error) {
+      setNotice({ ok: false, text: (error as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="container">
       <header className="topbar">
@@ -208,6 +307,70 @@ export default function App() {
         <div ref={containerRef} className="chart" />
       </section>
 
+      <section className="card trade-card">
+        <h2>下单</h2>
+        <div className="trade-form">
+          <div className="field">
+            <label>类型</label>
+            <select value={ordType} onChange={(event) => setOrdType(event.target.value as "limit" | "market")}>
+              <option value="limit">限价</option>
+              <option value="market">市价</option>
+            </select>
+          </div>
+          <div className="field">
+            <label>价格 (USDT)</label>
+            <input
+              type="number"
+              value={price}
+              disabled={ordType === "market"}
+              placeholder={ticker?.last ? fmt(ticker.last, 1) : "最新价"}
+              onChange={(event) => setPrice(event.target.value)}
+            />
+          </div>
+          <div className="field">
+            <label>张数</label>
+            <input
+              type="number"
+              value={size}
+              step={spec?.lotSz ?? "0.01"}
+              min={spec?.minSz ?? "0.01"}
+              onChange={(event) => setSize(event.target.value)}
+            />
+          </div>
+          <div className="field">
+            <label>杠杆</label>
+            <input
+              type="number"
+              value={lever}
+              min="1"
+              max={spec?.maxLever ?? "100"}
+              onChange={(event) => setLever(event.target.value)}
+            />
+          </div>
+          <div className="field">
+            <label>止盈价</label>
+            <input type="number" value={tp} placeholder="可选" onChange={(event) => setTp(event.target.value)} />
+          </div>
+          <div className="field">
+            <label>止损价</label>
+            <input type="number" value={sl} placeholder="可选" onChange={(event) => setSl(event.target.value)} />
+          </div>
+        </div>
+        <div className="trade-actions">
+          <button className="btn-long" disabled={busy || !accountEnabled} onClick={() => openPosition("long")}>
+            开多 / 买入
+          </button>
+          <button className="btn-short" disabled={busy || !accountEnabled} onClick={() => openPosition("short")}>
+            开空 / 卖出
+          </button>
+          <span className="label hint">
+            最小 {spec?.minSz ?? "-"} 张 · 步长 {spec?.lotSz ?? "-"} · 价格精度 {spec?.tickSz ?? "-"}
+          </span>
+        </div>
+        {notice && <div className={notice.ok ? "notice ok" : "notice err"}>{notice.text}</div>}
+        {!accountEnabled && <div className="label">未配置 OKX 凭据，无法下单。</div>}
+      </section>
+
       <section className="card">
         <h2>持仓</h2>
         {!accountEnabled && <div className="label">未配置 OKX 凭据，私有频道未启动。</div>}
@@ -222,6 +385,7 @@ export default function App() {
                 <th>均价</th>
                 <th>杠杆</th>
                 <th>未实现盈亏</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -235,6 +399,15 @@ export default function App() {
                   <td>{position.avgPx}</td>
                   <td>{position.lever}x</td>
                   <td className={Number(position.upl) >= 0 ? "up" : "down"}>{fmt(position.upl)}</td>
+                  <td>
+                    <button
+                      className="btn-ghost"
+                      disabled={busy}
+                      onClick={() => closePosition(position.posSide)}
+                    >
+                      市价全平
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
