@@ -23,16 +23,33 @@ class FakeMarket:
     bar = "1m"
 
     def __init__(self, closes: list[float]) -> None:
-        self.ticker = {"last": str(closes[-1])}
+        self.tickers: dict[str, dict[str, Any]] = {INST: {"last": str(closes[-1])}}
         # 传入的 closes 全部视为已收盘，额外补一根未收盘 K 线（策略会丢弃它）
         self._rows = [_row(index, close) for index, close in enumerate(closes)]
         self._rows.append(_row(len(closes), closes[-1]))
         self.listeners: list[Any] = []
 
+    @property
+    def ticker(self) -> dict[str, Any]:
+        return self.ticker_for(self.inst_id)
+
+    def ticker_for(self, inst_id: str) -> dict[str, Any]:
+        return self.tickers.get(inst_id, {})
+
+    def has(self, inst_id: str) -> bool:
+        return inst_id in self.tickers
+
+    async def add_instrument(self, inst_id: str) -> bool:
+        self.tickers.setdefault(inst_id, {})
+        return True
+
     def add_candle_listener(self, listener: Any) -> None:
         self.listeners.append(listener)
 
     def candles(self, limit: int = 200) -> list[list[str]]:
+        return self.candles_for(self.inst_id, limit)
+
+    def candles_for(self, inst_id: str, limit: int = 200) -> list[list[str]]:
         # 与真实服务一致：倒序返回，最后一根视为未收盘
         return list(reversed(self._rows))[:limit]
 
@@ -41,6 +58,9 @@ class FakeTrade:
     def __init__(self) -> None:
         self.opened: list[dict] = []
         self.closed: list[dict] = []
+        self.stops: list[dict] = []
+        self.trailing_stops: list[dict] = []
+        self.cancelled: list[dict] = []
         self.raise_on_open: Exception | None = None
 
     async def open_position(self, **kwargs: Any) -> dict:
@@ -52,6 +72,26 @@ class FakeTrade:
     async def close_position(self, **kwargs: Any) -> dict:
         self.closed.append(kwargs)
         return {"closed": [], "mode": "full"}
+
+    async def place_stop_loss(self, **kwargs: Any) -> dict:
+        self.stops.append(kwargs)
+        return {
+            "algo": {"algoId": f"algo-{len(self.stops)}"},
+            "triggerPx": str(kwargs["trigger_px"]),
+            "sz": str(kwargs["size"]),
+        }
+
+    async def place_trailing_stop(self, **kwargs: Any) -> dict:
+        self.trailing_stops.append(kwargs)
+        return {
+            "algo": {"algoId": f"trail-{len(self.trailing_stops)}"},
+            "callbackSpread": str(kwargs["callback_spread"]),
+            "sz": str(kwargs["size"]),
+        }
+
+    async def cancel_stop_loss(self, **kwargs: Any) -> dict:
+        self.cancelled.append(kwargs)
+        return {"cancelled": list(kwargs["algo_ids"])}
 
 
 class FakeAccount:
@@ -65,7 +105,18 @@ class FakeAccount:
 
 class FakeInstruments:
     def get(self, inst_id: str) -> SimpleNamespace:
-        return SimpleNamespace(ct_val=Decimal("0.01"))
+        return SimpleNamespace(ct_val=Decimal("0.01"), tick_sz=Decimal("0.1"))
+
+
+class FakeStore:
+    def __init__(self, data: dict | None = None) -> None:
+        self.data: dict = data or {}
+
+    def load(self) -> dict:
+        return self.data
+
+    def save(self, payload: dict) -> None:
+        self.data = dict(payload)
 
 
 def _row(ts: int, close: float) -> list[str]:
@@ -80,6 +131,8 @@ def _build(
     cooldown: int = 0,
     risk_max_size: str = "1",
     risk_max_notional: float = 100000,
+    trailing: bool = True,
+    store: Any | None = None,
 ) -> tuple[StrategyService, FakeMarket, FakeTrade, FakeAccount]:
     settings = Settings(risk_max_size=risk_max_size, risk_max_notional=risk_max_notional)
     market = FakeMarket(closes)
@@ -93,7 +146,16 @@ def _build(
         account=account,  # type: ignore[arg-type]
         risk=risk,
         instruments=FakeInstruments(),  # type: ignore[arg-type]
-        config=StrategyConfig(fast=2, slow=4, atr_period=2, atr_multiple=1.0, size=Decimal(size), cooldown_bars=cooldown),
+        config=StrategyConfig(
+            fast=2,
+            slow=4,
+            atr_period=2,
+            atr_multiple=1.0,
+            size=Decimal(size),
+            cooldown_bars=cooldown,
+            trailing=trailing,
+        ),
+        store=store,
     )
     return service, market, trade, account
 
@@ -102,7 +164,7 @@ def _build(
 GOLDEN_CLOSES = [5.0] * 5 + [3.0] * 5 + [20.0]
 
 
-async def test_golden_cross_opens_long_with_stop_loss() -> None:
+async def test_golden_cross_opens_long_with_native_trailing_stop() -> None:
     service, _, trade, _ = _build(GOLDEN_CLOSES)
     service.running = True
     await service.on_candle(INST)
@@ -111,7 +173,13 @@ async def test_golden_cross_opens_long_with_stop_loss() -> None:
     order = trade.opened[0]
     assert order["pos_side"] == "long"
     assert order["ord_type"] == "market"
-    assert order["sl_trigger_px"] < Decimal("20")
+    # 默认开启移动止损：由交易所原生 move_order_stop 维护，不再挂固定条件单
+    assert trade.stops == []
+    assert len(trade.trailing_stops) == 1
+    assert trade.trailing_stops[0]["pos_side"] == "long"
+    assert Decimal(str(trade.trailing_stops[0]["callback_spread"])) > 0
+    assert service.stop_spread is not None
+    assert service.stop_price is None
     assert service.last_signal == "long"
 
 
@@ -173,7 +241,7 @@ async def test_open_failure_is_recorded_and_does_not_raise() -> None:
 async def test_invalid_config_rejected() -> None:
     service, _, _, _ = _build(GOLDEN_CLOSES)
     with pytest.raises(ValueError):
-        service.update_config(StrategyConfig(fast=10, slow=5))
+        await service.update_config(StrategyConfig(fast=10, slow=5))
 
 
 def test_snapshot_contains_records_and_config() -> None:
@@ -198,3 +266,58 @@ async def test_cooldown_blocks_consecutive_signal() -> None:
 
     assert len(trade.opened) == 1
     assert any(record.event == "skip" for record in service.records)
+
+
+async def test_trailing_stop_is_maintained_by_exchange() -> None:
+    service, market, trade, account = _build(GOLDEN_CLOSES)
+    service.running = True
+    await service.on_candle(INST)
+    assert len(trade.trailing_stops) == 1
+
+    # 价格继续上涨：交易所自己上移触发价，策略不应重复撤挂
+    account._positions = [{"instId": INST, "posSide": "long", "pos": "0.01"}]
+    market.tickers[INST]["last"] = "40"
+    next_ts = len(GOLDEN_CLOSES) + 1
+    market._rows.extend([_row(next_ts, 40.0), _row(next_ts + 1, 40.0)])
+    await service.on_candle(INST)
+
+    assert trade.cancelled == []
+    assert len(trade.trailing_stops) == 1
+    assert service.stop_spread is not None
+
+
+async def test_trailing_disabled_uses_fixed_conditional_stop() -> None:
+    service, market, trade, account = _build(GOLDEN_CLOSES, trailing=False)
+    service.running = True
+    await service.on_candle(INST)
+    assert trade.trailing_stops == []
+    assert len(trade.stops) == 1
+    assert trade.stops[0]["pos_side"] == "long"
+    assert service.stop_price is not None
+    assert service.stop_spread is None
+
+    account._positions = [{"instId": INST, "posSide": "long", "pos": "0.01"}]
+    market.tickers[INST]["last"] = "40"
+    next_ts = len(GOLDEN_CLOSES) + 1
+    market._rows.extend([_row(next_ts, 40.0), _row(next_ts + 1, 40.0)])
+    await service.on_candle(INST)
+
+    assert trade.cancelled == []
+    assert len(trade.stops) == 1
+
+
+async def test_config_is_persisted_and_restored() -> None:
+    store = FakeStore()
+    service, _, _, _ = _build(GOLDEN_CLOSES, store=store)
+    service.running = True
+    await service.on_candle(INST)
+    assert store.data["last_signal"] == "long"
+
+    # 重启：用同一份存储重建服务，应恢复配置与信号，但不恢复运行状态与止损单
+    restored, _, _, _ = _build(GOLDEN_CLOSES, store=store)
+    assert restored.config.fast == 2
+    assert restored.last_signal == "long"
+    assert restored.running is False
+    assert restored.stop_price is None
+    assert restored.stop_spread is None
+    assert restored.stop_algo_ids == []

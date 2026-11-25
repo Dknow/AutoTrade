@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     # 存储
     database_url: str = "sqlite:///./autotrade.db"
 
+    # 行情：关注的合约列表（逗号分隔），首个为默认标的
+    market_inst_ids: str = "BTC-USDT-SWAP,ETH-USDT-SWAP,SOL-USDT-SWAP"
+    market_bar: str = "1m"
+
     # 策略参数（双均线 + ATR 止损），标的与周期跟随行情服务
     strategy_fast: int = 9
     strategy_slow: int = 21
@@ -45,6 +49,12 @@ class Settings(BaseSettings):
     strategy_size: str = "0.01"
     strategy_lever: int = 10
     strategy_cooldown_bars: int = 3
+    strategy_trailing: bool = True
+
+    @property
+    def market_inst_id_list(self) -> list[str]:
+        items = [item.strip().upper() for item in self.market_inst_ids.split(",")]
+        return [item for item in dict.fromkeys(items) if item]
 
     # 风控参数
     risk_max_size: str = "1"

@@ -17,6 +17,7 @@ router = APIRouter(tags=["strategy"])
 
 
 class StrategyUpdate(BaseModel):
+    inst_id: str | None = Field(None, min_length=1)
     fast: int | None = Field(None, gt=0)
     slow: int | None = Field(None, gt=0)
     atr_period: int | None = Field(None, gt=0)
@@ -24,6 +25,7 @@ class StrategyUpdate(BaseModel):
     size: Decimal | None = Field(None, gt=0)
     lever: int | None = Field(None, gt=0)
     cooldown_bars: int | None = Field(None, ge=0)
+    trailing: bool | None = None
 
 
 class KillSwitchRequest(BaseModel):
@@ -60,6 +62,7 @@ async def strategy_config(request: Request, payload: StrategyUpdate) -> dict:
         )
     current = service.config
     updated = StrategyConfig(
+        inst_id=payload.inst_id.strip().upper() if payload.inst_id else current.inst_id,
         fast=payload.fast if payload.fast is not None else current.fast,
         slow=payload.slow if payload.slow is not None else current.slow,
         atr_period=payload.atr_period if payload.atr_period is not None else current.atr_period,
@@ -68,9 +71,10 @@ async def strategy_config(request: Request, payload: StrategyUpdate) -> dict:
         lever=payload.lever if payload.lever is not None else current.lever,
         td_mode=current.td_mode,
         cooldown_bars=payload.cooldown_bars if payload.cooldown_bars is not None else current.cooldown_bars,
+        trailing=payload.trailing if payload.trailing is not None else current.trailing,
     )
     try:
-        return service.update_config(updated)
+        return await service.update_config(updated)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"code": "VALIDATION_ERROR", "message": str(exc)}) from exc
 

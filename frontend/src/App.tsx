@@ -39,8 +39,15 @@ type InstrumentSpec = {
 
 type StreamMessage = {
   type: string;
+  inst_id?: string;
   data?: unknown;
-  market?: { candles?: string[][]; ticker?: Ticker };
+  market?: {
+    inst_id?: string;
+    inst_ids?: string[];
+    candles?: string[][];
+    ticker?: Ticker;
+    tickers?: Record<string, Ticker>;
+  };
   account?: { enabled?: boolean; positions?: Position[] };
 };
 
@@ -49,6 +56,7 @@ type Notice = { ok: boolean; text: string };
 type StrategyRecord = { at: string; event: string; detail: string; ok: boolean };
 
 type StrategyConfigView = {
+  inst_id: string;
   fast: number;
   slow: number;
   atr_period: number;
@@ -57,6 +65,7 @@ type StrategyConfigView = {
   lever: number;
   td_mode: string;
   cooldown_bars: number;
+  trailing: boolean;
 };
 
 type StrategyState = {
@@ -66,6 +75,9 @@ type StrategyState = {
   config: StrategyConfigView;
   last_signal: string | null;
   last_error: string;
+  stop_price: string | null;
+  stop_spread: string | null;
+  stop_algo_ids: string[];
   records: StrategyRecord[];
 };
 
@@ -82,15 +94,17 @@ type RiskState = {
 };
 
 type ConfigForm = {
+  instId: string;
   fast: string;
   slow: string;
   atrMultiple: string;
   size: string;
   lever: string;
   cooldown: string;
+  trailing: boolean;
 };
 
-const INST_ID = "BTC-USDT-SWAP";
+const DEFAULT_INST = "BTC-USDT-SWAP";
 const WS_URL = `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/api/v1/ws/stream`;
 
 function toCandle(row: string[]): CandlestickData<UTCTimestamp> {
@@ -128,12 +142,16 @@ export default function App() {
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const lastTimeRef = useRef<number>(0);
 
-  const [ticker, setTicker] = useState<Ticker | null>(null);
+  const [instId, setInstId] = useState(DEFAULT_INST);
+  const [instIds, setInstIds] = useState<string[]>([DEFAULT_INST]);
+  const [tickers, setTickers] = useState<Record<string, Ticker>>({});
+  const instIdRef = useRef(instId);
+
   const [connected, setConnected] = useState(false);
   const [accountEnabled, setAccountEnabled] = useState(false);
   const [positions, setPositions] = useState<Position[]>([]);
 
-  const [spec, setSpec] = useState<InstrumentSpec | null>(null);
+  const [specs, setSpecs] = useState<Record<string, InstrumentSpec>>({});
   const [ordType, setOrdType] = useState<"limit" | "market">("limit");
   const [price, setPrice] = useState("");
   const [size, setSize] = useState("");
@@ -148,14 +166,19 @@ export default function App() {
   const [strategyBusy, setStrategyBusy] = useState(false);
   const [strategyNotice, setStrategyNotice] = useState<Notice | null>(null);
   const [configForm, setConfigForm] = useState<ConfigForm>({
+    instId: DEFAULT_INST,
     fast: "9",
     slow: "21",
     atrMultiple: "1.5",
     size: "0.01",
     lever: "10",
     cooldown: "3",
+    trailing: true,
   });
   const configInitialized = useRef(false);
+
+  const ticker = tickers[instId] ?? null;
+  const spec = specs[instId] ?? null;
 
   const loadStrategy = async () => {
     const [strategyData, riskData] = await Promise.all([
@@ -175,15 +198,21 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    instIdRef.current = instId;
+  }, [instId]);
+
+  useEffect(() => {
     if (strategy && !configInitialized.current) {
       configInitialized.current = true;
       setConfigForm({
+        instId: strategy.config.inst_id,
         fast: String(strategy.config.fast),
         slow: String(strategy.config.slow),
         atrMultiple: String(strategy.config.atr_multiple),
         size: strategy.config.size,
         lever: String(strategy.config.lever),
         cooldown: String(strategy.config.cooldown_bars),
+        trailing: strategy.config.trailing,
       });
     }
   }, [strategy]);
@@ -192,14 +221,15 @@ export default function App() {
     fetch("/api/v1/trade/instruments")
       .then((res) => res.json())
       .then((data: { specs?: Record<string, InstrumentSpec> }) => {
-        const item = data.specs?.[INST_ID];
-        if (item) {
-          setSpec(item);
-          setSize((current) => current || item.minSz);
-        }
+        setSpecs(data.specs ?? {});
       })
       .catch(() => setNotice({ ok: false, text: "合约规格加载失败，交易功能暂不可用" }));
   }, []);
+
+  useEffect(() => {
+    const item = specs[instId];
+    setSize(item?.minSz ?? "");
+  }, [instId, specs]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -234,6 +264,23 @@ export default function App() {
     };
   }, []);
 
+  // 切换标的时重新拉取历史 K 线，避免图表与所选合约不一致
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/v1/market/candles?instId=${encodeURIComponent(instId)}&bar=1m&limit=200`)
+      .then((res) => res.json())
+      .then((data: { candles?: string[][] }) => {
+        if (cancelled) return;
+        const candles = (data.candles ?? []).map(toCandle).sort((a, b) => a.time - b.time);
+        seriesRef.current?.setData(candles);
+        lastTimeRef.current = candles.length ? Number(candles[candles.length - 1].time) : 0;
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [instId]);
+
   useEffect(() => {
     let socket: WebSocket | null = null;
     let reconnectTimer: number | undefined;
@@ -242,20 +289,35 @@ export default function App() {
 
     const handleMessage = (message: StreamMessage) => {
       if (message.type === "snapshot") {
-        const rows = message.market?.candles ?? [];
-        const data = rows.map(toCandle).sort((a, b) => a.time - b.time);
-        seriesRef.current?.setData(data);
-        lastTimeRef.current = data.length ? Number(data[data.length - 1].time) : 0;
-        if (message.market?.ticker) setTicker(message.market.ticker);
+        const ids = message.market?.inst_ids ?? [];
+        if (ids.length > 0) setInstIds(ids);
+        const incoming = message.market?.tickers ?? {};
+        setTickers((prev) => ({ ...prev, ...incoming }));
+        if (message.market?.ticker?.inst_id) {
+          const first = message.market.ticker;
+          setTickers((prev) => ({ ...prev, [first.inst_id]: first }));
+        }
+        // 快照里的 K 线只属于默认标的，切到别的标的时交给 REST 加载
+        if (message.market?.inst_id === instIdRef.current) {
+          const rows = message.market?.candles ?? [];
+          const data = rows.map(toCandle).sort((a, b) => a.time - b.time);
+          seriesRef.current?.setData(data);
+          lastTimeRef.current = data.length ? Number(data[data.length - 1].time) : 0;
+        }
         setAccountEnabled(Boolean(message.account?.enabled));
         setPositions(message.account?.positions ?? []);
         return;
       }
       if (message.type === "ticker") {
-        setTicker(message.data as Ticker);
+        const target = message.inst_id;
+        if (target) {
+          const data = message.data as Ticker;
+          setTickers((prev) => ({ ...prev, [target]: data }));
+        }
         return;
       }
       if (message.type === "candle") {
+        if (message.inst_id && message.inst_id !== instIdRef.current) return;
         for (const row of (message.data as string[][]) ?? []) {
           const candle = toCandle(row);
           const time = Number(candle.time);
@@ -323,7 +385,7 @@ export default function App() {
     setNotice(null);
     try {
       await postJson("/trade/orders", {
-        inst_id: INST_ID,
+        inst_id: instId,
         pos_side: posSide,
         size: quantity,
         ord_type: ordType,
@@ -340,14 +402,14 @@ export default function App() {
     }
   };
 
-  const closePosition = async (posSide: string) => {
+  const closePosition = async (targetInstId: string, posSide: string) => {
     if (busy) return;
-    if (!window.confirm(`确认平掉 ${INST_ID} 的${posSide === "long" ? "多" : "空"}仓？`)) return;
+    if (!window.confirm(`确认平掉 ${targetInstId} 的${posSide === "long" ? "多" : "空"}仓？`)) return;
     setBusy(true);
     setNotice(null);
     try {
       await postJson("/trade/positions/close", {
-        inst_id: INST_ID,
+        inst_id: targetInstId,
         pos_side: posSide,
         ord_type: "market",
       });
@@ -395,12 +457,14 @@ export default function App() {
       const updated = await postJson<StrategyState>(
         "/strategy/config",
         {
+          inst_id: configForm.instId.trim().toUpperCase(),
           fast: Number(configForm.fast),
           slow: Number(configForm.slow),
           atr_multiple: Number(configForm.atrMultiple),
           size: Number(configForm.size),
           lever: Number(configForm.lever),
           cooldown_bars: Number(configForm.cooldown),
+          trailing: configForm.trailing,
         },
         "PATCH",
       );
@@ -445,7 +509,18 @@ export default function App() {
     <div className="container">
       <header className="topbar">
         <div>
-          <h1>BTC-USDT-SWAP</h1>
+          <div className="inst-switch">
+            <select value={instId} onChange={(event) => setInstId(event.target.value)}>
+              {Array.from(new Set([...instIds, strategy?.inst_id, DEFAULT_INST].filter(Boolean) as string[])).map(
+                (item) => (
+                  <option value={item} key={item}>
+                    {item}
+                  </option>
+                ),
+              )}
+            </select>
+            <h1>{instId}</h1>
+          </div>
           <div className="subtitle">USDT 本位永续 · 双向持仓 · 1m K 线</div>
         </div>
         <div className="price-block">
@@ -552,9 +627,30 @@ export default function App() {
             信号：{strategy?.last_signal === "long" ? "多" : strategy?.last_signal === "short" ? "空" : "无"}
           </span>
           <span className="label">周期：{strategy?.bar ?? "-"}</span>
+          <span className="label">标的：{strategy?.inst_id ?? "-"}</span>
+          <span className="label">
+            止损：
+            {strategy?.config.trailing
+              ? strategy?.stop_spread
+                ? `移动止损 · 回调价差 ${strategy.stop_spread}（交易所维护）`
+                : "未挂单"
+              : strategy?.stop_price
+                ? `固定止损 ${strategy.stop_price}`
+                : "未挂单"}
+          </span>
           {strategy?.last_error && <span className="label err">最近错误：{strategy.last_error}</span>}
         </div>
         <div className="trade-form">
+          <div className="field">
+            <label>交易标的</label>
+            <input
+              type="text"
+              value={configForm.instId}
+              disabled={strategy?.running}
+              placeholder="如 ETH-USDT-SWAP"
+              onChange={(event) => setConfigForm({ ...configForm, instId: event.target.value })}
+            />
+          </div>
           <div className="field">
             <label>快线</label>
             <input
@@ -609,6 +705,18 @@ export default function App() {
               disabled={strategy?.running}
               onChange={(event) => setConfigForm({ ...configForm, cooldown: event.target.value })}
             />
+          </div>
+          <div className="field">
+            <label>移动止损</label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={configForm.trailing}
+                disabled={strategy?.running}
+                onChange={(event) => setConfigForm({ ...configForm, trailing: event.target.checked })}
+              />
+              <span>{configForm.trailing ? "开启：交易所移动止损（ATR 价差）" : "关闭：固定条件止损"}</span>
+            </label>
           </div>
         </div>
         <div className="trade-actions">
@@ -705,7 +813,7 @@ export default function App() {
                     <button
                       className="btn-ghost"
                       disabled={busy}
-                      onClick={() => closePosition(position.posSide)}
+                      onClick={() => closePosition(position.instId, position.posSide)}
                     >
                       市价全平
                     </button>

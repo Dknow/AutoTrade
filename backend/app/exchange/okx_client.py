@@ -443,6 +443,75 @@ class OkxClient:
         data = await self._request("POST", "/api/v5/account/set-leverage", json_body=body, auth=True)
         return data[0] if data else {}
 
+    # ------------------------------------------------------------ 条件单（止损）
+    async def place_algo_order(
+        self,
+        *,
+        inst_id: str,
+        td_mode: str,
+        side: str,
+        pos_side: str,
+        sz: str,
+        sl_trigger_px: str,
+        reduce_only: bool = True,
+    ) -> dict:
+        """独立挂止损条件单；与开仓单分离，便于移动止损时撤销重建。"""
+        body: dict[str, Any] = {
+            "instId": inst_id,
+            "tdMode": td_mode,
+            "side": side,
+            "posSide": pos_side,
+            "ordType": "conditional",
+            "sz": str(sz),
+            "slTriggerPx": str(sl_trigger_px),
+            "slOrdPx": "-1",
+            "slTriggerPxType": "last",
+            "reduceOnly": reduce_only,
+        }
+        data = await self._request("POST", "/api/v5/trade/order-algo", json_body=body, auth=True)
+        return data[0] if data else {}
+
+    async def place_trailing_stop(
+        self,
+        *,
+        inst_id: str,
+        td_mode: str,
+        side: str,
+        pos_side: str,
+        sz: str,
+        callback_spread: str,
+        reduce_only: bool = True,
+    ) -> dict:
+        """原生移动止损：callbackSpread 为绝对价差，由交易所跟踪最优价并自动移动触发价。"""
+        body: dict[str, Any] = {
+            "instId": inst_id,
+            "tdMode": td_mode,
+            "side": side,
+            "posSide": pos_side,
+            "ordType": "move_order_stop",
+            "sz": str(sz),
+            "callbackSpread": str(callback_spread),
+            "reduceOnly": reduce_only,
+        }
+        data = await self._request("POST", "/api/v5/trade/order-algo", json_body=body, auth=True)
+        return data[0] if data else {}
+
+    async def get_algo_orders(
+        self, *, inst_id: str, ord_type: str = "conditional", inst_type: str = "SWAP"
+    ) -> list[dict]:
+        # 官方文档要求 instType 必填，instId 作为过滤条件
+        data = await self._request(
+            "GET",
+            "/api/v5/trade/orders-algo-pending",
+            params={"instType": inst_type, "instId": inst_id, "ordType": ord_type},
+            auth=True,
+        )
+        return [item for item in data if isinstance(item, dict)]
+
+    async def cancel_algo_orders(self, *, inst_id: str, algo_ids: list[str]) -> list[dict]:
+        body = [{"instId": inst_id, "algoId": algo_id} for algo_id in algo_ids]
+        return await self._request("POST", "/api/v5/trade/cancel-algos", json_body=body, auth=True)
+
 
 def create_okx_client_from_settings(settings: Any) -> OkxClient:
     """按配置创建客户端。"""

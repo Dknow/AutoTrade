@@ -187,6 +187,75 @@ class TradeService:
         logger.info("杠杆设置完成 | %s %sx %s posSide=%s", inst_id, plain(lever_value), td_mode, pos_side)
         return {"leverage": result}
 
+    # ------------------------------------------------------------------ 止损
+    async def place_stop_loss(
+        self,
+        *,
+        inst_id: str,
+        pos_side: str,
+        size: Decimal | str | float,
+        trigger_px: Decimal | str | float,
+        td_mode: str = "cross",
+    ) -> dict[str, Any]:
+        """挂独立止损条件单，返回 algoId（用于后续移动止损时撤销）。"""
+        pos_side = _check_pos_side(pos_side)
+        spec = self.instruments.get(inst_id)
+        sz = plain(_align_size(spec, size))
+        px = plain(_align_price(spec, trigger_px))
+        side = "sell" if pos_side == "long" else "buy"
+        algo = await self.client.place_algo_order(
+            inst_id=inst_id,
+            td_mode=td_mode,
+            side=side,
+            pos_side=pos_side,
+            sz=sz,
+            sl_trigger_px=px,
+        )
+        logger.info("止损条件单已提交 | %s %s %s张 触发价=%s algoId=%s", inst_id, pos_side, sz, px, algo.get("algoId"))
+        return {"algo": algo, "triggerPx": px, "sz": sz}
+
+    async def place_trailing_stop(
+        self,
+        *,
+        inst_id: str,
+        pos_side: str,
+        size: Decimal | str | float,
+        callback_spread: Decimal | str | float,
+        td_mode: str = "cross",
+    ) -> dict[str, Any]:
+        """挂交易所原生移动止损（move_order_stop），由交易所负责跟踪最优价。"""
+        pos_side = _check_pos_side(pos_side)
+        spec = self.instruments.get(inst_id)
+        sz = plain(_align_size(spec, size))
+        spread = plain(_align_price(spec, callback_spread))
+        side = "sell" if pos_side == "long" else "buy"
+        algo = await self.client.place_trailing_stop(
+            inst_id=inst_id,
+            td_mode=td_mode,
+            side=side,
+            pos_side=pos_side,
+            sz=sz,
+            callback_spread=spread,
+        )
+        logger.info(
+            "移动止损已提交 | %s %s %s张 回调价差=%s algoId=%s",
+            inst_id, pos_side, sz, spread, algo.get("algoId"),
+        )
+        return {"algo": algo, "callbackSpread": spread, "sz": sz}
+
+    async def cancel_stop_loss(self, *, inst_id: str, algo_ids: list[str]) -> dict[str, Any]:
+        if not algo_ids:
+            return {"cancelled": []}
+        result = await self.client.cancel_algo_orders(inst_id=inst_id, algo_ids=algo_ids)
+        logger.info("止损条件单已撤销 | %s %s", inst_id, algo_ids)
+        return {"cancelled": result}
+
+    async def list_stop_losses(self, *, inst_id: str, pos_side: str | None = None) -> list[dict[str, Any]]:
+        orders = await self.client.get_algo_orders(inst_id=inst_id)
+        if pos_side is not None:
+            orders = [item for item in orders if item.get("posSide") == pos_side]
+        return orders
+
     # ------------------------------------------------------------------ 内部
     def _held_size(self, inst_id: str, pos_side: str) -> Decimal | None:
         """从账户缓存读取该方向持仓张数。

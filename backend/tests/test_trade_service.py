@@ -48,6 +48,15 @@ def _transport(record: list[httpx.Request]) -> httpx.MockTransport:
             return httpx.Response(200, json={"code": "0", "data": [INSTRUMENT]})
         if path == "/api/v5/trade/close-position":
             return httpx.Response(200, json={"code": "0", "data": [{"instId": "BTC-USDT-SWAP"}]})
+        if path == "/api/v5/trade/order-algo":
+            return httpx.Response(200, json={"code": "0", "data": [{"algoId": "algo-1", "sCode": "0"}]})
+        if path == "/api/v5/trade/cancel-algos":
+            return httpx.Response(200, json={"code": "0", "data": [{"algoId": "algo-1", "sCode": "0"}]})
+        if path == "/api/v5/trade/orders-algo-pending":
+            return httpx.Response(
+                200,
+                json={"code": "0", "data": [{"algoId": "algo-1", "posSide": "long"}]},
+            )
         return httpx.Response(200, json={"code": "0", "data": [{"ordId": "1001"}]})
 
     return httpx.MockTransport(handler)
@@ -251,3 +260,65 @@ async def test_amend_order_sends_new_price() -> None:
     body = _last_json(record)
     assert body["newPx"] == "60100.1"
     assert "newSz" not in body
+
+
+async def test_place_stop_loss_long_uses_sell_reduce_only() -> None:
+    record: list[httpx.Request] = []
+    client, service = await _build(record)
+    async with client:
+        result = await service.place_stop_loss(
+            inst_id="BTC-USDT-SWAP", pos_side="long", size=1, trigger_px=55000
+        )
+    assert record[-1].url.path == "/api/v5/trade/order-algo"
+    body = _last_json(record)
+    assert body["ordType"] == "conditional"
+    assert body["side"] == "sell"
+    assert body["posSide"] == "long"
+    assert body["reduceOnly"] is True
+    assert body["slTriggerPx"] == "55000"
+    assert body["slOrdPx"] == "-1"
+    assert result["algo"]["algoId"] == "algo-1"
+
+
+async def test_place_stop_loss_short_uses_buy() -> None:
+    record: list[httpx.Request] = []
+    client, service = await _build(record)
+    async with client:
+        await service.place_stop_loss(
+            inst_id="BTC-USDT-SWAP", pos_side="short", size=2, trigger_px=65000
+        )
+    body = _last_json(record)
+    assert body["side"] == "buy"
+    assert body["posSide"] == "short"
+    assert body["sz"] == "2"
+
+
+async def test_place_trailing_stop_sends_callback_spread() -> None:
+    record: list[httpx.Request] = []
+    client, service = await _build(record)
+    async with client:
+        result = await service.place_trailing_stop(
+            inst_id="BTC-USDT-SWAP", pos_side="short", size=1, callback_spread=Decimal("50")
+        )
+    assert record[-1].url.path == "/api/v5/trade/order-algo"
+    body = _last_json(record)
+    assert body["ordType"] == "move_order_stop"
+    assert body["side"] == "buy"
+    assert body["posSide"] == "short"
+    assert body["callbackSpread"] == "50"
+    assert body["reduceOnly"] is True
+    assert "slTriggerPx" not in body
+    assert result["callbackSpread"] == "50"
+
+
+async def test_cancel_stop_loss_sends_algo_ids() -> None:
+    record: list[httpx.Request] = []
+    client, service = await _build(record)
+    async with client:
+        await service.cancel_stop_loss(inst_id="BTC-USDT-SWAP", algo_ids=["algo-1", "algo-2"])
+    assert record[-1].url.path == "/api/v5/trade/cancel-algos"
+    body = json.loads(record[-1].content.decode())
+    assert body == [
+        {"instId": "BTC-USDT-SWAP", "algoId": "algo-1"},
+        {"instId": "BTC-USDT-SWAP", "algoId": "algo-2"},
+    ]

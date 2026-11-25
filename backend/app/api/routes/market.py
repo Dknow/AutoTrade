@@ -18,14 +18,16 @@ async def market_snapshot(request: Request) -> dict:
 @router.get("/market/candles")
 async def market_candles(
     request: Request,
+    inst_id: str | None = Query(None, alias="instId"),
     bar: str = Query("1m"),
     limit: int = Query(200, ge=1, le=300),
 ) -> dict:
     """从 OKX REST 拉取历史 K 线（前端首次加载用）。"""
     service = request.app.state.market_service
+    target = (inst_id or service.inst_id).strip().upper()
     client = create_okx_client_from_settings(get_settings())
     try:
-        rows = await client.get_candles(service.inst_id, bar=bar, limit=limit)
+        rows = await client.get_candles(target, bar=bar, limit=limit)
     except OkxAPIError as exc:
         raise HTTPException(
             status_code=503,
@@ -33,7 +35,7 @@ async def market_candles(
         ) from exc
     finally:
         await client.aclose()
-    return {"inst_id": service.inst_id, "bar": bar, "candles": rows}
+    return {"inst_id": target, "bar": bar, "candles": rows}
 
 
 @router.websocket("/ws/stream")

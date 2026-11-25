@@ -2,7 +2,7 @@
 
 基于 OKX v5 官方接口的 USDT 本位永续合约自动化交易系统（双向持仓模式）。
 
-当前进度：**P3 - 策略与风控**（双均线 + ATR 止损、限额校验、回撤熔断、Kill Switch）。
+当前进度：**P3.1 - 策略增强**（多标的行情、移动止损、策略状态持久化）。
 
 ## 技术栈
 
@@ -74,8 +74,8 @@ cd backend
 |---|---|
 | `GET /api/v1/health` | 服务健康状态 |
 | `GET /api/v1/exchange/selfcheck` | OKX 连通性、时钟偏移、账户模式 |
-| `GET /api/v1/market/snapshot` | 行情快照（ticker + 最近 200 根 K 线） |
-| `GET /api/v1/market/candles?bar=1m&limit=200` | 历史 K 线 |
+| `GET /api/v1/market/snapshot` | 行情快照（默认标的 ticker、`inst_ids`/`tickers` 多标的、最近 200 根 K 线） |
+| `GET /api/v1/market/candles?instId=BTC-USDT-SWAP&bar=1m&limit=200` | 指定标的历史 K 线（`instId` 省略时用默认标的） |
 | `WS /api/v1/ws/stream` | 实时推送：`snapshot` / `ticker` / `candle` / `positions` / `orders` |
 | `GET /api/v1/trade/instruments` | USDT 本位永续合约规格（面值/步长/精度/最大杠杆） |
 | `POST /api/v1/trade/instruments/refresh` | 刷新合约规格缓存 |
@@ -96,9 +96,21 @@ cd backend
 
 - 仅使用**已收盘** K 线，EMA 快线上穿慢线开多、下穿开空；
 - 一次只持一边仓位，反向信号先平旧仓再开新仓；
-- 开仓时附带 ATR 止损（`最新价 ± ATR × 倍数`），走 `attachAlgoOrds`；
+- 止损交给**交易所原生移动止损** `move_order_stop`：`callbackSpread = ATR × 倍数`（绝对价差），
+  由 OKX 跟踪开仓后的最优价自动上移/下移触发价，策略不再逐根 K 线撤旧挂新；
+- 关闭 `STRATEGY_TRAILING` 时改为挂固定条件止损单 `conditional`（`slTriggerPx`）；
+- 注意：回调价差在开仓时确定，后续 ATR 变化不会重算；部分平仓不会自动撤销该保护单，
+  全平走 `close-position` 的 `autoCxl=true` 会自动撤销；
 - 冷却 N 根 K 线内不重复开仓，抑制震荡打脸；
-- 开仓前必须通过风控：单笔张数上限、名义价值上限、回撤熔断。
+- 开仓前必须通过风控：单笔张数上限、名义价值上限、回撤熔断；
+- 策略参数与最近信号持久化到 SQLite（`strategy_state` 表），重启后自动恢复；
+  不恢复运行状态与止损单号，避免与交易所真实挂单不一致。
+
+### 多标的
+
+- `MARKET_INST_IDS` 决定启动时订阅的合约列表（默认 BTC/ETH/SOL 三个），首个为默认标的；
+- 策略可随时切换标的，若目标标的不在订阅列表中会自动动态订阅并预热规格；
+- 前端顶部下拉可切换图表与手动下单标的，策略卡单独选择策略标的。
 
 私有频道（持仓、订单、账户）只在配置 OKX 凭据后启动，否则自动跳过。
 
@@ -122,6 +134,9 @@ cd backend
 | `OKX_PROXY` | 本地代理，如 `http://127.0.0.1:7890`，留空直连 |
 | `OKX_RESOLVE_IP` | DNS 被污染时的兜底固定 IP，见下方说明 |
 | `DATABASE_URL` | 默认 `sqlite:///./autotrade.db` |
+| `MARKET_INST_IDS` | 订阅的合约列表，逗号分隔，首个为默认标的 |
+| `MARKET_BAR` | 行情周期，默认 `1m` |
+| `STRATEGY_TRAILING` | 是否开启移动止损，默认 `true` |
 
 ### 关于 OKX 域名无法解析
 
@@ -185,5 +200,6 @@ cd frontend; npm run build
 - [x] P1 WebSocket 行情与私有频道（模拟盘凭据已验证）
 - [x] P2 交易执行引擎（双向持仓，开多→止盈止损→全平闭环已验证）
 - [x] P3 策略与风控（双均线 + ATR 止损、限额、回撤熔断、Kill Switch）
+- [x] P3.1 策略增强（多标的行情、移动止损、策略状态持久化）
 - [ ] P4 完整可视化界面
 - [ ] P5 回测与部署文档

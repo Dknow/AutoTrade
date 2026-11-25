@@ -12,12 +12,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import __version__
 from app.api.routes import health, market, strategy, trade
 from app.core.config import Settings, get_settings
+from app.db import models  # noqa: F401 - 导入模型以注册表结构
 from app.db.session import Base, create_db_engine, create_session_factory
 from app.exchange.okx_client import create_okx_client_from_settings
 from app.services.account_service import AccountService
 from app.services.instrument_service import InstrumentService
 from app.services.market_service import MarketService
 from app.services.risk_service import RiskService
+from app.services.state_store import StrategyStateStore
 from app.services.strategy_service import StrategyConfig, StrategyService
 from app.services.trade_service import TradeService
 
@@ -27,9 +29,10 @@ logger = logging.getLogger(__name__)
 async def _warmup_candles(market_service: MarketService, settings: Settings) -> None:
     client = create_okx_client_from_settings(settings)
     try:
-        rows = await client.get_candles(market_service.inst_id, bar=market_service.bar, limit=200)
-        market_service.seed_candles(rows)
-        logger.info("历史 K 线预热完成: %d 条", len(rows))
+        for inst_id in market_service.inst_ids:
+            rows = await client.get_candles(inst_id, bar=market_service.bar, limit=200)
+            market_service.seed_candles(rows, inst_id)
+            logger.info("历史 K 线预热完成 | %s %d 条", inst_id, len(rows))
     except Exception as exc:  # noqa: BLE001 - 预热失败不应阻塞启动
         logger.warning("历史 K 线预热失败（不影响启动）: %s", exc)
     finally:
@@ -46,9 +49,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     engine = create_db_engine(settings.database_url)
     Base.metadata.create_all(engine)
     app.state.engine = engine
-    app.state.session_factory = create_session_factory(engine)
+    session_factory = create_session_factory(engine)
+    app.state.session_factory = session_factory
 
-    market_service = MarketService()
+    market_service = MarketService(settings.market_inst_id_list, settings.market_bar)
     account_service = AccountService(settings)
     okx_client = create_okx_client_from_settings(settings)
     instruments = InstrumentService(okx_client)
@@ -62,6 +66,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         risk=risk_service,
         instruments=instruments,
         config=StrategyConfig.from_settings(settings),
+        store=StrategyStateStore(session_factory),
     )
 
     app.state.market_service = market_service
