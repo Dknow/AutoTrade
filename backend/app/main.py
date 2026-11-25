@@ -10,11 +10,26 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.api.routes import health
-from app.core.config import get_settings
+from app.api.routes import health, market
+from app.core.config import Settings, get_settings
 from app.db.session import Base, create_db_engine, create_session_factory
+from app.exchange.okx_client import create_okx_client_from_settings
+from app.services.account_service import AccountService
+from app.services.market_service import MarketService
 
 logger = logging.getLogger(__name__)
+
+
+async def _warmup_candles(market_service: MarketService, settings: Settings) -> None:
+    client = create_okx_client_from_settings(settings)
+    try:
+        rows = await client.get_candles(market_service.inst_id, bar=market_service.bar, limit=200)
+        market_service.seed_candles(rows)
+        logger.info("历史 K 线预热完成: %d 条", len(rows))
+    except Exception as exc:  # noqa: BLE001 - 预热失败不应阻塞启动
+        logger.warning("历史 K 线预热失败（不影响启动）: %s", exc)
+    finally:
+        await client.aclose()
 
 
 @asynccontextmanager
@@ -28,9 +43,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Base.metadata.create_all(engine)
     app.state.engine = engine
     app.state.session_factory = create_session_factory(engine)
+
+    market_service = MarketService()
+    account_service = AccountService(settings)
+    app.state.market_service = market_service
+    app.state.account_service = account_service
+
+    await _warmup_candles(market_service, settings)
+    await market_service.start()
+    await account_service.start()
     logger.info("AutoTrade 启动 | env=%s | simulated=%s | base_url=%s", settings.app_env, settings.okx_simulated, settings.okx_base_url)
-    yield
-    engine.dispose()
+    try:
+        yield
+    finally:
+        await account_service.stop()
+        await market_service.stop()
+        engine.dispose()
 
 
 def create_app() -> FastAPI:
@@ -44,6 +72,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(health.router, prefix=settings.api_prefix)
+    app.include_router(market.router, prefix=settings.api_prefix)
     return app
 
 

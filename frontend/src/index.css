@@ -131,3 +131,78 @@ pre {
   overflow-x: auto;
   color: #9fb3c8;
 }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+.price-block {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.price {
+  font-size: 30px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.change {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.up {
+  color: var(--ok);
+}
+
+.down {
+  color: var(--err);
+}
+
+.stats {
+  display: flex;
+  gap: 22px;
+  margin-left: auto;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-card {
+  padding: 10px;
+  margin-bottom: 16px;
+}
+
+.chart {
+  width: 100%;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 9px 8px;
+  border-bottom: 1px solid rgba(48, 54, 61, 0.6);
+}
+
+th {
+  color: var(--muted);
+  font-weight: 500;
+}

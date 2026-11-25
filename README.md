@@ -67,6 +67,18 @@ cd backend
 - 公共接口测试在 OKX 不可达时自动跳过；
 - 私有接口测试在未配置凭据时自动跳过。
 
+## 接口一览
+
+| 方法与路径 | 说明 |
+|---|---|
+| `GET /api/v1/health` | 服务健康状态 |
+| `GET /api/v1/exchange/selfcheck` | OKX 连通性、时钟偏移、账户模式 |
+| `GET /api/v1/market/snapshot` | 行情快照（ticker + 最近 200 根 K 线） |
+| `GET /api/v1/market/candles?bar=1m&limit=200` | 历史 K 线 |
+| `WS /api/v1/ws/stream` | 实时推送：`snapshot` / `ticker` / `candle` / `positions` / `orders` |
+
+私有频道（持仓、订单、账户）只在配置 OKX 凭据后启动，否则自动跳过。
+
 ## 配置说明（backend/.env）
 
 | 变量 | 说明 |
@@ -136,7 +148,7 @@ cd frontend; npm run build
 ## 路线图
 
 - [x] P0 脚手架 + OKX 客户端 + 冒烟测试
-- [ ] P1 WebSocket 行情与私有频道
+- [x] P1 WebSocket 行情与私有频道（私有频道待模拟盘凭据验证）
 - [ ] P2 交易执行引擎（双向持仓）
 - [ ] P3 策略引擎 + 风控熔断
 - [ ] P4 完整可视化界面
