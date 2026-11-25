@@ -46,6 +46,50 @@ type StreamMessage = {
 
 type Notice = { ok: boolean; text: string };
 
+type StrategyRecord = { at: string; event: string; detail: string; ok: boolean };
+
+type StrategyConfigView = {
+  fast: number;
+  slow: number;
+  atr_period: number;
+  atr_multiple: number;
+  size: string;
+  lever: number;
+  td_mode: string;
+  cooldown_bars: number;
+};
+
+type StrategyState = {
+  running: boolean;
+  inst_id: string;
+  bar: string;
+  config: StrategyConfigView;
+  last_signal: string | null;
+  last_error: string;
+  records: StrategyRecord[];
+};
+
+type RiskState = {
+  tripped: boolean;
+  trip_reason: string;
+  tripped_at: string;
+  peak_equity: string | null;
+  equity: string | null;
+  drawdown_pct: string;
+  max_drawdown_pct: string;
+  max_size: string;
+  max_notional: string;
+};
+
+type ConfigForm = {
+  fast: string;
+  slow: string;
+  atrMultiple: string;
+  size: string;
+  lever: string;
+  cooldown: string;
+};
+
 const INST_ID = "BTC-USDT-SWAP";
 const WS_URL = `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/api/v1/ws/stream`;
 
@@ -64,9 +108,9 @@ function fmt(value: string | undefined, digits = 2): string {
   return Number.isFinite(num) ? num.toFixed(digits) : "-";
 }
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
+async function postJson<T>(path: string, body: unknown, method = "POST"): Promise<T> {
   const response = await fetch(`/api/v1${path}`, {
-    method: "POST",
+    method,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
@@ -98,6 +142,51 @@ export default function App() {
   const [sl, setSl] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
+
+  const [strategy, setStrategy] = useState<StrategyState | null>(null);
+  const [risk, setRisk] = useState<RiskState | null>(null);
+  const [strategyBusy, setStrategyBusy] = useState(false);
+  const [strategyNotice, setStrategyNotice] = useState<Notice | null>(null);
+  const [configForm, setConfigForm] = useState<ConfigForm>({
+    fast: "9",
+    slow: "21",
+    atrMultiple: "1.5",
+    size: "0.01",
+    lever: "10",
+    cooldown: "3",
+  });
+  const configInitialized = useRef(false);
+
+  const loadStrategy = async () => {
+    const [strategyData, riskData] = await Promise.all([
+      fetch("/api/v1/strategy").then((res) => res.json()),
+      fetch("/api/v1/risk").then((res) => res.json()),
+    ]);
+    setStrategy(strategyData as StrategyState);
+    setRisk(riskData as RiskState);
+  };
+
+  useEffect(() => {
+    loadStrategy().catch(() => undefined);
+    const timer = window.setInterval(() => {
+      loadStrategy().catch(() => undefined);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (strategy && !configInitialized.current) {
+      configInitialized.current = true;
+      setConfigForm({
+        fast: String(strategy.config.fast),
+        slow: String(strategy.config.slow),
+        atrMultiple: String(strategy.config.atr_multiple),
+        size: strategy.config.size,
+        lever: String(strategy.config.lever),
+        cooldown: String(strategy.config.cooldown_bars),
+      });
+    }
+  }, [strategy]);
 
   useEffect(() => {
     fetch("/api/v1/trade/instruments")
@@ -270,6 +359,88 @@ export default function App() {
     }
   };
 
+  const startStrategy = async () => {
+    if (strategyBusy) return;
+    setStrategyBusy(true);
+    setStrategyNotice(null);
+    try {
+      setStrategy(await postJson<StrategyState>("/strategy/start", {}));
+      setStrategyNotice({ ok: true, text: "策略已启动" });
+    } catch (error) {
+      setStrategyNotice({ ok: false, text: (error as Error).message });
+    } finally {
+      setStrategyBusy(false);
+    }
+  };
+
+  const stopStrategy = async () => {
+    if (strategyBusy) return;
+    setStrategyBusy(true);
+    setStrategyNotice(null);
+    try {
+      setStrategy(await postJson<StrategyState>("/strategy/stop", {}));
+      setStrategyNotice({ ok: true, text: "策略已停止" });
+    } catch (error) {
+      setStrategyNotice({ ok: false, text: (error as Error).message });
+    } finally {
+      setStrategyBusy(false);
+    }
+  };
+
+  const saveConfig = async () => {
+    if (strategyBusy) return;
+    setStrategyBusy(true);
+    setStrategyNotice(null);
+    try {
+      const updated = await postJson<StrategyState>(
+        "/strategy/config",
+        {
+          fast: Number(configForm.fast),
+          slow: Number(configForm.slow),
+          atr_multiple: Number(configForm.atrMultiple),
+          size: Number(configForm.size),
+          lever: Number(configForm.lever),
+          cooldown_bars: Number(configForm.cooldown),
+        },
+        "PATCH",
+      );
+      setStrategy(updated);
+      setStrategyNotice({ ok: true, text: "参数已保存" });
+    } catch (error) {
+      setStrategyNotice({ ok: false, text: (error as Error).message });
+    } finally {
+      setStrategyBusy(false);
+    }
+  };
+
+  const killSwitch = async () => {
+    if (!window.confirm("Kill Switch：停止策略并市价全平所有持仓，确认执行？")) return;
+    setStrategyBusy(true);
+    setStrategyNotice(null);
+    try {
+      await postJson("/risk/kill-switch", { close_all: true, reason: "前端手动触发" });
+      await loadStrategy();
+      setStrategyNotice({ ok: true, text: "Kill Switch 已执行" });
+    } catch (error) {
+      setStrategyNotice({ ok: false, text: (error as Error).message });
+    } finally {
+      setStrategyBusy(false);
+    }
+  };
+
+  const resetRisk = async () => {
+    setStrategyBusy(true);
+    setStrategyNotice(null);
+    try {
+      setRisk(await postJson<RiskState>("/risk/reset", {}));
+      setStrategyNotice({ ok: true, text: "熔断已复位" });
+    } catch (error) {
+      setStrategyNotice({ ok: false, text: (error as Error).message });
+    } finally {
+      setStrategyBusy(false);
+    }
+  };
+
   return (
     <div className="container">
       <header className="topbar">
@@ -369,6 +540,137 @@ export default function App() {
         </div>
         {notice && <div className={notice.ok ? "notice ok" : "notice err"}>{notice.text}</div>}
         {!accountEnabled && <div className="label">未配置 OKX 凭据，无法下单。</div>}
+      </section>
+
+      <section className="card strategy-card">
+        <h2>策略 · 双均线 + ATR 止损</h2>
+        <div className="status-row">
+          <span className={`tag ${strategy?.running ? "ok" : "warn"}`}>
+            {strategy?.running ? "运行中" : "已停止"}
+          </span>
+          <span className="label">
+            信号：{strategy?.last_signal === "long" ? "多" : strategy?.last_signal === "short" ? "空" : "无"}
+          </span>
+          <span className="label">周期：{strategy?.bar ?? "-"}</span>
+          {strategy?.last_error && <span className="label err">最近错误：{strategy.last_error}</span>}
+        </div>
+        <div className="trade-form">
+          <div className="field">
+            <label>快线</label>
+            <input
+              type="number"
+              value={configForm.fast}
+              disabled={strategy?.running}
+              onChange={(event) => setConfigForm({ ...configForm, fast: event.target.value })}
+            />
+          </div>
+          <div className="field">
+            <label>慢线</label>
+            <input
+              type="number"
+              value={configForm.slow}
+              disabled={strategy?.running}
+              onChange={(event) => setConfigForm({ ...configForm, slow: event.target.value })}
+            />
+          </div>
+          <div className="field">
+            <label>ATR 倍数</label>
+            <input
+              type="number"
+              step="0.1"
+              value={configForm.atrMultiple}
+              disabled={strategy?.running}
+              onChange={(event) => setConfigForm({ ...configForm, atrMultiple: event.target.value })}
+            />
+          </div>
+          <div className="field">
+            <label>下单张数</label>
+            <input
+              type="number"
+              value={configForm.size}
+              disabled={strategy?.running}
+              onChange={(event) => setConfigForm({ ...configForm, size: event.target.value })}
+            />
+          </div>
+          <div className="field">
+            <label>杠杆</label>
+            <input
+              type="number"
+              value={configForm.lever}
+              disabled={strategy?.running}
+              onChange={(event) => setConfigForm({ ...configForm, lever: event.target.value })}
+            />
+          </div>
+          <div className="field">
+            <label>冷却 K 线</label>
+            <input
+              type="number"
+              value={configForm.cooldown}
+              disabled={strategy?.running}
+              onChange={(event) => setConfigForm({ ...configForm, cooldown: event.target.value })}
+            />
+          </div>
+        </div>
+        <div className="trade-actions">
+          <button onClick={startStrategy} disabled={strategyBusy || strategy?.running}>
+            启动策略
+          </button>
+          <button className="btn-ghost" onClick={stopStrategy} disabled={strategyBusy || !strategy?.running}>
+            停止策略
+          </button>
+          <button className="btn-ghost" onClick={saveConfig} disabled={strategyBusy || strategy?.running}>
+            保存参数
+          </button>
+        </div>
+        {strategyNotice && (
+          <div className={strategyNotice.ok ? "notice ok" : "notice err"}>{strategyNotice.text}</div>
+        )}
+        {strategy && strategy.records.length > 0 && (
+          <div className="records">
+            {strategy.records.slice(0, 12).map((record, index) => (
+              <div className={`record ${record.ok ? "" : "err"}`} key={`${record.at}-${index}`}>
+                <span className="label">{record.at.slice(11, 19)}</span>
+                <span className="event">{record.event}</span>
+                <span>{record.detail}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>风控</h2>
+        <div className="risk-grid">
+          <div className="stat">
+            <span className="label">当前权益</span>
+            <span>{risk?.equity ?? "-"} USDT</span>
+          </div>
+          <div className="stat">
+            <span className="label">峰值权益</span>
+            <span>{risk?.peak_equity ?? "-"} USDT</span>
+          </div>
+          <div className="stat">
+            <span className="label">当前回撤</span>
+            <span className={Number(risk?.drawdown_pct ?? 0) >= Number(risk?.max_drawdown_pct ?? 0) ? "down" : ""}>
+              {risk?.drawdown_pct ?? "-"}% / 阈值 {risk?.max_drawdown_pct ?? "-"}%
+            </span>
+          </div>
+          <div className="stat">
+            <span className="label">单笔上限</span>
+            <span>
+              {risk?.max_size ?? "-"} 张 / {risk?.max_notional ?? "-"} USDT
+            </span>
+          </div>
+        </div>
+        {risk?.tripped && <div className="notice err">已熔断：{risk.trip_reason}</div>}
+        <div className="trade-actions">
+          <button className="btn-short" onClick={killSwitch} disabled={strategyBusy}>
+            Kill Switch（停策略 + 全平）
+          </button>
+          <button className="btn-ghost" onClick={resetRisk} disabled={strategyBusy}>
+            复位熔断
+          </button>
+        </div>
       </section>
 
       <section className="card">

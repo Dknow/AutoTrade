@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from app.exchange.okx_ws import BUSINESS_WS_URL, PUBLIC_WS_URL, OkxWsClient
@@ -34,9 +35,14 @@ class MarketService:
         self.ticker: dict[str, Any] = {}
         self._candles: dict[int, list[str]] = {}
         self.hub = ClientHub()
+        self._candle_listeners: list[Callable[[str], Awaitable[None]]] = []
         # tickers 在 public 端点；K 线频道已迁移到 business 端点
         self.ws = OkxWsClient(PUBLIC_WS_URL, name="public")
         self.candle_ws = OkxWsClient(BUSINESS_WS_URL, name="business")
+
+    def add_candle_listener(self, listener: Callable[[str], Awaitable[None]]) -> None:
+        """注册 K 线更新回调，供策略引擎驱动评估。"""
+        self._candle_listeners.append(listener)
 
     async def start(self) -> None:
         self.ws.set_handler(self._on_message)
@@ -88,6 +94,11 @@ class MarketService:
                     self._candles[int(row[0])] = row
             self._trim_candles()
             await self.hub.broadcast({"type": "candle", "data": self.candles(2)})
+            for listener in list(self._candle_listeners):
+                try:
+                    await listener(self.inst_id)
+                except Exception:  # noqa: BLE001 - 单个监听器异常不影响行情推送
+                    logger.exception("K 线监听器执行失败")
 
     def _trim_candles(self) -> None:
         if len(self._candles) <= MAX_CANDLES:

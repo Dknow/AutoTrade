@@ -189,8 +189,12 @@ class TradeService:
 
     # ------------------------------------------------------------------ 内部
     def _held_size(self, inst_id: str, pos_side: str) -> Decimal | None:
-        """从账户缓存读取该方向持仓张数；缓存不可用时返回 None（跳过本地校验）。"""
-        if self.account_service is None:
+        """从账户缓存读取该方向持仓张数。
+
+        缓存未就绪（REST 快照未完成 / 私有频道未推送）时返回 None 跳过本地校验，
+        否则刚开仓就平仓会因为缓存滞后被误判为"无持仓"。
+        """
+        if self.account_service is None or not self.account_service.ready:
             return None
         for position in self.account_service.active_positions():
             if position.get("instId") == inst_id and position.get("posSide") == pos_side:

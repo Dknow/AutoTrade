@@ -2,7 +2,7 @@
 
 基于 OKX v5 官方接口的 USDT 本位永续合约自动化交易系统（双向持仓模式）。
 
-当前进度：**P2 - 交易执行引擎**（开仓/平仓/撤改单/止盈止损，模拟盘闭环已验证）。
+当前进度：**P3 - 策略与风控**（双均线 + ATR 止损、限额校验、回撤熔断、Kill Switch）。
 
 ## 技术栈
 
@@ -23,7 +23,7 @@ AutoTrade/
 │   │   ├── core/config.py    # 配置（从 backend/.env 读取）
 │   │   ├── db/session.py     # SQLAlchemy 引擎与会话
 │   │   ├── exchange/         # OKX 客户端、签名、限频、WS
-│   │   ├── services/         # 行情、账户、合约规格、交易执行
+│   │   ├── services/         # 行情、账户、合约规格、交易、策略、风控
 │   │   └── main.py           # FastAPI 入口
 │   ├── tests/                # 签名/Mock/公共接口/私有接口测试
 │   ├── requirements.txt
@@ -85,6 +85,20 @@ cd backend
 | `POST /api/v1/trade/positions/close` | 平仓（`size` 留空为市价全平，`autoCxl` 自动撤止盈止损） |
 | `POST /api/v1/trade/leverage` | 设置杠杆（双向持仓需带 `pos_side`） |
 | `GET /api/v1/trade/orders/pending` | 当前未成交挂单 |
+| `GET /api/v1/strategy` | 策略状态、参数与最近 50 条决策日志 |
+| `POST /api/v1/strategy/start` / `stop` | 启动 / 停止策略 |
+| `PATCH /api/v1/strategy/config` | 修改策略参数（运行中返回 409） |
+| `GET /api/v1/risk` | 风控状态：权益、峰值、回撤、限额、熔断标志 |
+| `POST /api/v1/risk/kill-switch` | 熔断：停止策略，可选市价全平所有持仓 |
+| `POST /api/v1/risk/reset` | 人工复位熔断 |
+
+### 策略逻辑
+
+- 仅使用**已收盘** K 线，EMA 快线上穿慢线开多、下穿开空；
+- 一次只持一边仓位，反向信号先平旧仓再开新仓；
+- 开仓时附带 ATR 止损（`最新价 ± ATR × 倍数`），走 `attachAlgoOrds`；
+- 冷却 N 根 K 线内不重复开仓，抑制震荡打脸；
+- 开仓前必须通过风控：单笔张数上限、名义价值上限、回撤熔断。
 
 私有频道（持仓、订单、账户）只在配置 OKX 凭据后启动，否则自动跳过。
 
@@ -170,6 +184,6 @@ cd frontend; npm run build
 - [x] P0 脚手架 + OKX 客户端 + 冒烟测试
 - [x] P1 WebSocket 行情与私有频道（模拟盘凭据已验证）
 - [x] P2 交易执行引擎（双向持仓，开多→止盈止损→全平闭环已验证）
-- [ ] P3 策略引擎 + 风控熔断
+- [x] P3 策略与风控（双均线 + ATR 止损、限额、回撤熔断、Kill Switch）
 - [ ] P4 完整可视化界面
 - [ ] P5 回测与部署文档

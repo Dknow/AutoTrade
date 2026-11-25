@@ -30,8 +30,9 @@ INSTRUMENT = {
 
 
 class FakeAccountService:
-    def __init__(self, positions: list[dict]) -> None:
+    def __init__(self, positions: list[dict], ready: bool = True) -> None:
         self._positions = positions
+        self.ready = ready
 
     def active_positions(self) -> list[dict]:
         return self._positions
@@ -52,7 +53,7 @@ def _transport(record: list[httpx.Request]) -> httpx.MockTransport:
     return httpx.MockTransport(handler)
 
 
-async def _build(record: list[httpx.Request], *, positions: list[dict] | None = None):
+async def _build(record: list[httpx.Request], *, positions: list[dict] | None = None, ready: bool = True):
     client = OkxClient(
         api_key="k",
         secret_key="s",
@@ -62,7 +63,7 @@ async def _build(record: list[httpx.Request], *, positions: list[dict] | None = 
     )
     instruments = InstrumentService(client)
     await instruments.load()
-    service = TradeService(client, instruments, FakeAccountService(positions or []))
+    service = TradeService(client, instruments, FakeAccountService(positions or [], ready=ready))
     return client, service
 
 
@@ -180,6 +181,16 @@ async def test_reject_close_without_position() -> None:
     async with client:
         with pytest.raises(TradeValidationError):
             await service.close_position(inst_id="BTC-USDT-SWAP", pos_side="long")
+
+
+async def test_close_skips_local_check_when_cache_not_ready() -> None:
+    """账户缓存未就绪时应放行，交给交易所 reduceOnly 兜底，避免刚开仓就平仓被误拒。"""
+    record: list[httpx.Request] = []
+    client, service = await _build(record, positions=[], ready=False)
+    async with client:
+        result = await service.close_position(inst_id="BTC-USDT-SWAP", pos_side="long")
+    assert result["mode"] == "full"
+    assert record[-1].url.path == "/api/v5/trade/close-position"
 
 
 async def test_reject_close_size_over_held() -> None:

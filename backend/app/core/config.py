@@ -37,6 +37,20 @@ class Settings(BaseSettings):
     # 存储
     database_url: str = "sqlite:///./autotrade.db"
 
+    # 策略参数（双均线 + ATR 止损），标的与周期跟随行情服务
+    strategy_fast: int = 9
+    strategy_slow: int = 21
+    strategy_atr_period: int = 14
+    strategy_atr_multiple: float = 1.5
+    strategy_size: str = "0.01"
+    strategy_lever: int = 10
+    strategy_cooldown_bars: int = 3
+
+    # 风控参数
+    risk_max_size: str = "1"
+    risk_max_notional: float = 1000.0
+    risk_max_drawdown_pct: float = 20.0
+
     @property
     def okx_has_credentials(self) -> bool:
         return bool(self.okx_api_key and self.okx_secret_key and self.okx_passphrase)

@@ -22,6 +22,8 @@ class AccountService:
         self.account: dict[str, Any] = {}
         self.hub = ClientHub()
         self.ws: OkxWsClient | None = None
+        # 缓存是否已可用（REST 快照成功或已收到私有频道推送）；未就绪时不做本地持仓校验
+        self.ready = False
         if self.enabled:
             url = PRIVATE_SIMULATED_WS_URL if settings.okx_simulated else PRIVATE_WS_URL
             self.ws = OkxWsClient(
@@ -61,6 +63,7 @@ class AccountService:
             balance = await client.get_balance("USDT")
             if balance:
                 self.account = balance[0]
+            self.ready = True
         except Exception as exc:  # noqa: BLE001 - 快照失败不应阻塞启动
             logger.warning("账户初始快照拉取失败: %s", exc)
         finally:
@@ -88,6 +91,8 @@ class AccountService:
     async def _on_message(self, message: dict[str, Any]) -> None:
         channel = str((message.get("arg") or {}).get("channel", ""))
         data = message.get("data") or []
+        if data:
+            self.ready = True
 
         if channel == "positions":
             for position in data:
