@@ -10,6 +10,7 @@ import {
 } from "lightweight-charts";
 import { EquityChart, type EquityPoint } from "./components/EquityChart";
 import { OrdersPanel } from "./components/OrdersPanel";
+import { BacktestPanel } from "./components/BacktestPanel";
 
 type Ticker = {
   inst_id: string;
@@ -939,6 +940,8 @@ export default function App() {
       </section>
 
       <OrdersPanel />
+
+      <BacktestPanel instIds={instIds} />
 
       <section className="card">
         <h2>持仓</h2>

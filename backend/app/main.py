@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.api.routes import account, health, market, strategy, trade
+from app.api.routes import account, backtest, health, market, strategy, trade
 from app.core.config import Settings, get_settings
 from app.db import models  # noqa: F401 - 导入模型以注册表结构
 from app.db.session import Base, create_db_engine, create_session_factory
@@ -110,6 +110,7 @@ def create_app() -> FastAPI:
     app.include_router(trade.router, prefix=settings.api_prefix)
     app.include_router(strategy.router, prefix=settings.api_prefix)
     app.include_router(account.router, prefix=settings.api_prefix)
+    app.include_router(backtest.router, prefix=settings.api_prefix)
     return app
 
 

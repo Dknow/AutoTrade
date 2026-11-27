@@ -261,6 +261,11 @@ class OkxClient:
         after: str | None = None,
         before: str | None = None,
     ) -> list[list[str]]:
+        """K 线（降序返回）。
+
+        注意 OKX 分页语义：`after` = 返回早于该时间戳的数据（向历史翻页），
+        `before` = 返回晚于该时间戳的数据（向最新翻页），不要写反。
+        """
         data = await self._request(
             "GET",
             "/api/v5/market/candles",
