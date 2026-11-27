@@ -51,9 +51,25 @@ class Settings(BaseSettings):
     strategy_cooldown_bars: int = 3
     strategy_trailing: bool = True
 
+    # 量化数据管道：留空标的则复用 MARKET_INST_IDS
+    quant_inst_ids: str = ""
+    quant_bars: str = "1H,4H,1D"
+    quant_years: float = 5.0
+
     @property
     def market_inst_id_list(self) -> list[str]:
         items = [item.strip().upper() for item in self.market_inst_ids.split(",")]
+        return [item for item in dict.fromkeys(items) if item]
+
+    @property
+    def quant_inst_id_list(self) -> list[str]:
+        source = self.quant_inst_ids or self.market_inst_ids
+        items = [item.strip().upper() for item in source.split(",")]
+        return [item for item in dict.fromkeys(items) if item]
+
+    @property
+    def quant_bar_list(self) -> list[str]:
+        items = [item.strip() for item in self.quant_bars.split(",")]
         return [item for item in dict.fromkeys(items) if item]
 
     # 风控参数

@@ -10,12 +10,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.api.routes import account, backtest, health, market, strategy, trade
+from app.api.routes import account, backtest, data, health, market, quant, strategy, trade
 from app.core.config import Settings, get_settings
 from app.db import models  # noqa: F401 - 导入模型以注册表结构
 from app.db.session import Base, create_db_engine, create_session_factory
 from app.exchange.okx_client import create_okx_client_from_settings
 from app.services.account_service import AccountService
+from app.services.candle_store import CandleStore
+from app.services.data_pipeline import DataSyncManager
 from app.services.instrument_service import InstrumentService
 from app.services.market_service import MarketService
 from app.services.risk_service import RiskService
@@ -51,6 +53,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.engine = engine
     session_factory = create_session_factory(engine)
     app.state.session_factory = session_factory
+    app.state.settings = settings
 
     market_service = MarketService(settings.market_inst_id_list, settings.market_bar)
     account_service = AccountService(settings, session_factory)
@@ -76,6 +79,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.trade_service = trade_service
     app.state.risk_service = risk_service
     app.state.strategy_service = strategy_service
+    candle_store = CandleStore(session_factory)
+    app.state.candle_store = candle_store
+    app.state.data_sync = DataSyncManager(
+        client=okx_client, store=candle_store, default_years=settings.quant_years
+    )
 
     await _warmup_candles(market_service, settings)
     try:
@@ -89,6 +97,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await strategy_service.stop()
+        await app.state.data_sync.stop()
         await account_service.stop()
         await market_service.stop()
         await okx_client.aclose()
@@ -111,6 +120,8 @@ def create_app() -> FastAPI:
     app.include_router(strategy.router, prefix=settings.api_prefix)
     app.include_router(account.router, prefix=settings.api_prefix)
     app.include_router(backtest.router, prefix=settings.api_prefix)
+    app.include_router(data.router, prefix=settings.api_prefix)
+    app.include_router(quant.router, prefix=settings.api_prefix)
     return app
 
 

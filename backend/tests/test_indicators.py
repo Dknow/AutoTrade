@@ -4,7 +4,16 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.indicators import atr, cross_signal, ema_series
+from app.services.indicators import (
+    atr,
+    atr_series,
+    bollinger_series,
+    cross_signal,
+    donchian_series,
+    ema_series,
+    rolling_std_series,
+    sma_series,
+)
 
 
 def _row(ts: int, high: float, low: float, close: float) -> list[str]:
@@ -59,3 +68,49 @@ def test_atr_computes_average_true_range() -> None:
 def test_atr_returns_none_when_insufficient() -> None:
     rows = [_row(1, 10, 8, 9), _row(2, 11, 9, 10)]
     assert atr(rows, 5) is None
+
+
+def test_sma_series_matches_manual_average() -> None:
+    result = sma_series([1.0, 2.0, 3.0, 4.0], 2)
+    assert result[0] is None
+    assert result[1] == pytest.approx(1.5)
+    assert result[2] == pytest.approx(2.5)
+    assert result[3] == pytest.approx(3.5)
+
+
+def test_rolling_std_matches_population_std() -> None:
+    # 窗口 [2,4,4,4,5,5,7,9] 的总体标准差为 2
+    values = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
+    result = rolling_std_series(values, 8)
+    assert result[7] == pytest.approx(2.0)
+    assert result[6] is None
+
+
+def test_bollinger_bands_use_mid_and_std() -> None:
+    values = [10.0, 10.0, 10.0, 10.0, 10.0]
+    mid, upper, lower = bollinger_series(values, 3, 2.0)
+    assert mid[-1] == pytest.approx(10.0)
+    assert upper[-1] == pytest.approx(10.0)
+    assert lower[-1] == pytest.approx(10.0)
+
+
+def test_donchian_uses_prior_bars_only() -> None:
+    rows = [
+        _row(1, 10, 8, 9),
+        _row(2, 12, 9, 10),
+        _row(3, 11, 7, 9),
+        _row(4, 20, 15, 18),  # 当根高点 20 不应出现在自己的上轨里
+    ]
+    upper, lower = donchian_series(rows, 3)
+    assert upper[2] is None
+    assert upper[3] == pytest.approx(12.0)
+    assert lower[3] == pytest.approx(7.0)
+
+
+def test_atr_series_matches_atr_scalar() -> None:
+    rows = [_row(index, 10 + index, 8 + index, 9 + index) for index in range(1, 6)]
+    series = atr_series(rows, 2)
+    assert series[0] is None
+    assert series[1] is None
+    assert series[2] == pytest.approx(atr(rows[:3], 2))
+    assert series[-1] == pytest.approx(atr(rows, 2))

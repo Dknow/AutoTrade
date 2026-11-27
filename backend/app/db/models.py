@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, DateTime, String, Text
+from sqlalchemy import BigInteger, DateTime, Float, SmallInteger, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
@@ -32,3 +32,24 @@ class EquitySnapshotRow(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     ts: Mapped[int] = mapped_column(BigInteger, index=True)  # 毫秒时间戳
     total_eq: Mapped[str] = mapped_column(String(40))
+
+
+class CandleRow(Base):
+    """历史 K 线，只追加不覆盖：唯一键 (inst_id, bar, ts)，重复写入自动忽略。
+
+    confirm=1 表示该根已收盘。回测只读取已收盘数据，避免未来函数。
+    """
+
+    __tablename__ = "candles"
+    __table_args__ = (UniqueConstraint("inst_id", "bar", "ts", name="uq_candles_inst_bar_ts"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    inst_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    bar: Mapped[str] = mapped_column(String(8), nullable=False)
+    ts: Mapped[int] = mapped_column(BigInteger, nullable=False)  # 毫秒时间戳
+    open: Mapped[float] = mapped_column(Float, nullable=False)
+    high: Mapped[float] = mapped_column(Float, nullable=False)
+    low: Mapped[float] = mapped_column(Float, nullable=False)
+    close: Mapped[float] = mapped_column(Float, nullable=False)
+    vol: Mapped[float] = mapped_column(Float, default=0.0)
+    confirm: Mapped[int] = mapped_column(SmallInteger, default=1)

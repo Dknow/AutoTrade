@@ -274,6 +274,34 @@ class OkxClient:
         )
         return [row for row in data if isinstance(row, list)]
 
+    async def get_history_candles(
+        self,
+        inst_id: str,
+        *,
+        bar: str = "1m",
+        limit: int = 100,
+        after: str | None = None,
+        before: str | None = None,
+    ) -> list[list[str]]:
+        """历史 K 线（单页最多 100 根），用于多年数据回补。
+
+        `/market/candles` 只能覆盖最近 1440 根，更早的数据必须走 `history-candles`。
+        分页语义与 `get_candles` 相同：`after` 指向更早的时间戳。
+        """
+        data = await self._request(
+            "GET",
+            "/api/v5/market/history-candles",
+            params={
+                "instId": inst_id,
+                "bar": bar,
+                "limit": min(int(limit), 100),
+                "after": after,
+                "before": before,
+            },
+            auth=False,
+        )
+        return [row for row in data if isinstance(row, list)]
+
     # ------------------------------------------------------------ 账户私有
     async def get_balance(self, ccy: str | None = None) -> list[dict]:
         data = await self._request(

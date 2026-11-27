@@ -19,11 +19,11 @@
 AutoTrade/
 ├── backend/
 │   ├── app/
-│   │   ├── api/routes/       # HTTP 路由（health、market、trade）
+│   │   ├── api/routes/       # HTTP 路由（health、market、trade、data、quant）
 │   │   ├── core/config.py    # 配置（从 backend/.env 读取）
 │   │   ├── db/session.py     # SQLAlchemy 引擎与会话
 │   │   ├── exchange/         # OKX 客户端、签名、限频、WS
-│   │   ├── services/         # 行情、账户、合约规格、交易、策略、风控
+│   │   ├── services/         # 行情、账户、交易、策略、风控、数据管道、量化回测
 │   │   └── main.py           # FastAPI 入口
 │   ├── tests/                # 签名/Mock/公共接口/私有接口测试
 │   ├── requirements.txt
@@ -90,6 +90,10 @@ cd backend
 | `POST /api/v1/trade/algo-orders/{algo_id}/cancel` | 撤销条件单/移动止损 |
 | `GET /api/v1/account/equity-history?limit=300` | 账户净值历史（升序 `[{ts, eq}]`，每分钟一条快照） |
 | `POST /api/v1/backtest/run` | 运行策略回测（拉取历史 K 线，返回指标、净值曲线与逐笔交易） |
+| `GET /api/v1/data/coverage` | 本地 K 线库覆盖度（每个标的/周期的条数与首尾时间戳） |
+| `POST /api/v1/data/sync` | 启动后台同步（多年回补 + 增量更新，可指定标的/周期/年限） |
+| `GET /api/v1/data/sync/status` | 查看后台同步任务进度与各系列结果 |
+| `POST /api/v1/quant/backtest` | 量化回测（布林均值回归 / 唐奇安突破，含成本敏感度与 Purged Walk-Forward） |
 | `GET /api/v1/strategy` | 策略状态、参数与最近 50 条决策日志 |
 | `POST /api/v1/strategy/start` / `stop` | 启动 / 停止策略 |
 | `PATCH /api/v1/strategy/config` | 修改策略参数（运行中返回 409） |
@@ -139,6 +143,47 @@ cd backend
 - 回测结束时仍有持仓，按最后一根收盘价强制平仓；
 - 限制：不含资金费率、强平与穿仓；`/market/candles` 最多回溯 1440 根，更长周期请把 `bar` 放大。
 
+## 数据管道与量化回测（P0）
+
+### 历史 K 线管道
+
+- 表 `candles`，唯一键 `(inst_id, bar, ts)`，**只追加不覆盖**，重复写入自动忽略；
+- 数据源为 `/api/v5/market/history-candles`（单页 100 根），按 `after` 向历史翻页，
+  可回补多年数据（默认 5 年，支持 `1H/4H/1D` 等周期）；
+- 首次运行做回补，之后每次运行自动增量：翻到「整页都不晚于库中最新时间戳」即停止；
+- 中断后重新运行会从最新继续向前补齐，天然支持断点续传；
+- 只保存 OKX 原生字段，`confirm=1` 才算已收盘，回测只读取已收盘 K 线。
+
+使用流程：
+
+```powershell
+# 1) 后台同步 BTC/ETH/SOL 的 1H、4H、1D（默认 5 年）
+curl.exe -X POST http://127.0.0.1:8000/api/v1/data/sync -H "Content-Type: application/json" -d "{}"
+
+# 2) 查看进度与覆盖度
+curl.exe http://127.0.0.1:8000/api/v1/data/sync/status
+curl.exe http://127.0.0.1:8000/api/v1/data/coverage
+
+# 3) 用本地数据做量化回测
+curl.exe -X POST http://127.0.0.1:8000/api/v1/quant/backtest -H "Content-Type: application/json" `
+  -d '{"inst_id":"BTC-USDT-SWAP","bar":"1D","strategy":"donchian","params":{"period":20,"rr":2.0}}'
+```
+
+### 回测口径
+
+- 信号：第 i 根收盘出信号，第 i+1 根**开盘价**成交；指标只使用当根及之前的数据；
+- 离场：`ATR × atr_multiple` 止损、`rr × 风险` 止盈、可选 `max_hold_bars` 时间止损；
+  同一根内止损优先于止盈；
+- 仓位：每笔风险 = 当前权益 × `risk_pct`（默认 1%），按止损距离反推张数，
+  使期望 R、夏普、最大回撤可跨标的比较；
+- 成本：手续费（默认双边 0.05%）、滑点（默认单边 0.02%）、资金费率（默认 0，按每根计），
+  并提供 `cost_sensitivity` 从 0 倍到 3 倍成本重跑；
+- 指标：期望 R/笔、胜率、盈亏比、年化夏普、最大回撤、费用、资金费率、最大连续亏损；
+- 样本外：`purged_walk_forward` 用训练段选参，强制留出 `purge_bars + embargo_bars`
+  空档，再在测试段评估；聚合结果只统计逐笔 R，避免跨空档拼接净值造成误导。
+
+不建议只看胜率，判断标准统一为：扣费后期望 R/笔 > 0.10、年化夏普 > 1.0、最大回撤 < 15%。
+
 ### 双向持仓下单规则
 
 | 动作 | side | posSide | 附加 |
@@ -162,6 +207,9 @@ cd backend
 | `MARKET_INST_IDS` | 订阅的合约列表，逗号分隔，首个为默认标的 |
 | `MARKET_BAR` | 行情周期，默认 `1m` |
 | `STRATEGY_TRAILING` | 是否开启移动止损，默认 `true` |
+| `QUANT_INST_IDS` | 量化数据管道标的，留空复用 `MARKET_INST_IDS` |
+| `QUANT_BARS` | 量化数据周期列表，默认 `1H,4H,1D` |
+| `QUANT_YEARS` | 历史回补年限，默认 `5` |
 
 ### 关于 OKX 域名无法解析
 
@@ -248,6 +296,20 @@ docker compose up -d --build
 - [ ] `restart: unless-stopped` 与 Docker 开机自启已生效；
 - [ ] 数据库已纳入定期备份。
 
+### 常见问题（Docker）
+
+- **拉镜像报 `failed to resolve source metadata ... docker.mirrors.ustc.edu.cn`**：旧镜像加速器已停止服务，换成可用源后执行 `sudo service docker restart`：
+
+  ```json
+  { "registry-mirrors": ["https://docker.1ms.run", "https://docker.m.daocloud.io"] }
+  ```
+
+- **报 `exec: "docker-credential-desktop.exe": executable file not found`**：WSL 里的 `~/.docker/config.json` 指向了 Windows 凭据助手，删掉 `credsStore` 一项即可（拉公共镜像不需要凭据助手）。
+
+- **WSL 里没有 `docker compose` 子命令**：把 compose v2 二进制放到 `~/.docker/cli-plugins/docker-compose` 并 `chmod +x`，无需 sudo。
+
+- **宿主访问 `localhost:8080` 偶发被拒绝**：WSL 重启后 localhost 端口转发需要几秒恢复，重试即可；排查时先在 WSL 内 `curl 127.0.0.1:8080` 区分是转发问题还是容器问题。
+
 ## 安全约定
 
 1. `.env` 已在 `.gitignore` 中，密钥只允许存在于本地；
@@ -297,3 +359,4 @@ cd frontend; npm run build
 - [x] P4 完整可视化界面（EMA 叠加与交易标记、净值曲线、挂单面板、日志筛选）
 - [x] P5 回测引擎（历史 K 线回测、胜率/回撤/盈亏比、逐笔交易、前端回测面板）
 - [x] P6 部署文档（Docker、前端静态托管、开机自启）
+- [x] P7 数据管道与量化回测框架（多年 K 线只追加入库、成本模型、Purged Walk-Forward）

@@ -15,7 +15,7 @@ from decimal import Decimal
 from typing import Any
 
 from app.exchange.okx_client import OkxClient
-from app.services.indicators import ema_series
+from app.services.indicators import atr_series, ema_series
 
 logger = logging.getLogger(__name__)
 
@@ -109,20 +109,6 @@ async def fetch_history_candles(
     return [rows[ts] for ts in sorted(rows)]
 
 
-def _atr_series(rows: list[list[str]], period: int) -> list[float | None]:
-    """与 indicators.atr 算法一致，但一次性算出每根 K 线的 ATR。"""
-    result: list[float | None] = [None] * len(rows)
-    for index in range(period, len(rows)):
-        total = 0.0
-        for offset in range(index - period + 1, index + 1):
-            high = float(rows[offset][2])
-            low = float(rows[offset][3])
-            prev_close = float(rows[offset - 1][4])
-            total += max(high - low, abs(high - prev_close), abs(low - prev_close))
-        result[index] = total / period
-    return result
-
-
 def _signal_at(
     fast_line: list[float | None], slow_line: list[float | None], index: int
 ) -> str | None:
@@ -170,7 +156,7 @@ def run_backtest(rows: list[list[str]], *, ct_val: float, params: BacktestParams
     closes = [float(row[4]) for row in ordered]
     fast_line = ema_series(closes, params.fast)
     slow_line = ema_series(closes, params.slow)
-    atr_line = _atr_series(ordered, params.atr_period)
+    atr_line = atr_series(ordered, params.atr_period)
     warmup = max(params.slow, params.atr_period + 1)
 
     size = float(params.size)
