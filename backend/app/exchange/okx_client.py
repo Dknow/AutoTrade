@@ -497,15 +497,13 @@ class OkxClient:
         return data[0] if data else {}
 
     async def get_algo_orders(
-        self, *, inst_id: str, ord_type: str = "conditional", inst_type: str = "SWAP"
+        self, *, inst_id: str | None = None, ord_type: str = "conditional", inst_type: str = "SWAP"
     ) -> list[dict]:
-        # 官方文档要求 instType 必填，instId 作为过滤条件
-        data = await self._request(
-            "GET",
-            "/api/v5/trade/orders-algo-pending",
-            params={"instType": inst_type, "instId": inst_id, "ordType": ord_type},
-            auth=True,
-        )
+        # 官方文档要求 instType 必填，instId 作为可选过滤条件
+        params: dict[str, Any] = {"instType": inst_type, "ordType": ord_type}
+        if inst_id:
+            params["instId"] = inst_id
+        data = await self._request("GET", "/api/v5/trade/orders-algo-pending", params=params, auth=True)
         return [item for item in data if isinstance(item, dict)]
 
     async def cancel_algo_orders(self, *, inst_id: str, algo_ids: list[str]) -> list[dict]:

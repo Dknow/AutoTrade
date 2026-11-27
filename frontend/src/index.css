@@ -380,3 +380,25 @@ th {
   padding: 0;
   margin: 0;
 }
+
+.log-filters {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.chip {
+  background: #0b0f14;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chip.active {
+  color: var(--text);
+  border-color: #58a6ff;
+  background: rgba(88, 166, 255, 0.12);
+}

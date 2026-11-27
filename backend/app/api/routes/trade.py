@@ -99,6 +99,29 @@ async def pending_orders(request: Request, inst_id: str | None = Query(None)) ->
     return {"orders": rows}
 
 
+@router.get("/trade/algo-orders")
+async def algo_orders(request: Request, inst_id: str | None = Query(None)) -> dict:
+    """条件单与移动止损挂单（止盈止损类），供前端挂单面板展示。"""
+    client = request.app.state.okx_client
+    rows: list[dict] = []
+    try:
+        for ord_type in ("conditional", "move_order_stop"):
+            rows.extend(await client.get_algo_orders(inst_id=inst_id, ord_type=ord_type))
+    except OkxAPIError as exc:
+        raise _fail(exc) from exc
+    return {"orders": rows}
+
+
+@router.post("/trade/algo-orders/{algo_id}/cancel")
+async def cancel_algo_order(request: Request, algo_id: str, payload: CancelOrderRequest) -> dict:
+    service = request.app.state.trade_service
+    try:
+        return await service.cancel_stop_loss(inst_id=payload.inst_id, algo_ids=[algo_id])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("撤销条件单失败: %s", exc)
+        raise _fail(exc) from exc
+
+
 @router.post("/trade/orders")
 async def open_position(request: Request, payload: OpenPositionRequest) -> dict:
     service = request.app.state.trade_service

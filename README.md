@@ -2,7 +2,7 @@
 
 基于 OKX v5 官方接口的 USDT 本位永续合约自动化交易系统（双向持仓模式）。
 
-当前进度：**P3.1 - 策略增强**（多标的行情、移动止损、策略状态持久化）。
+当前进度：**P4 - 完整可视化界面**（EMA 叠加与交易标记、净值曲线、挂单面板、日志筛选）。
 
 ## 技术栈
 
@@ -85,6 +85,9 @@ cd backend
 | `POST /api/v1/trade/positions/close` | 平仓（`size` 留空为市价全平，`autoCxl` 自动撤止盈止损） |
 | `POST /api/v1/trade/leverage` | 设置杠杆（双向持仓需带 `pos_side`） |
 | `GET /api/v1/trade/orders/pending` | 当前未成交挂单 |
+| `GET /api/v1/trade/algo-orders` | 条件单 + 移动止损挂单（支持 `instId` 过滤） |
+| `POST /api/v1/trade/algo-orders/{algo_id}/cancel` | 撤销条件单/移动止损 |
+| `GET /api/v1/account/equity-history?limit=300` | 账户净值历史（升序 `[{ts, eq}]`，每分钟一条快照） |
 | `GET /api/v1/strategy` | 策略状态、参数与最近 50 条决策日志 |
 | `POST /api/v1/strategy/start` / `stop` | 启动 / 停止策略 |
 | `PATCH /api/v1/strategy/config` | 修改策略参数（运行中返回 409） |
@@ -113,6 +116,15 @@ cd backend
 - 前端顶部下拉可切换图表与手动下单标的，策略卡单独选择策略标的。
 
 私有频道（持仓、订单、账户）只在配置 OKX 凭据后启动，否则自动跳过。
+
+### 可视化界面
+
+- K 线图：叠加策略 EMA 快慢线（蓝=快线、粉=慢线），并在对应 K 线上标注开多/开空/平仓标记；
+  仅当图表标的与策略标的一致时叠加，避免误导；
+- 净值曲线：账户 `totalEq` 每分钟落库一条（`equity_snapshots` 表），前端每 30s 刷新；
+  快照只增不删，长期运行需自行归档；
+- 挂单面板：普通委托与条件单/移动止损分表展示，支持单个撤单（10s 轮询）；
+- 策略日志：支持 全部 / 交易 / 止损 / 告警 筛选。
 
 ### 双向持仓下单规则
 
@@ -201,5 +213,5 @@ cd frontend; npm run build
 - [x] P2 交易执行引擎（双向持仓，开多→止盈止损→全平闭环已验证）
 - [x] P3 策略与风控（双均线 + ATR 止损、限额、回撤熔断、Kill Switch）
 - [x] P3.1 策略增强（多标的行情、移动止损、策略状态持久化）
-- [ ] P4 完整可视化界面
+- [x] P4 完整可视化界面（EMA 叠加与交易标记、净值曲线、挂单面板、日志筛选）
 - [ ] P5 回测与部署文档

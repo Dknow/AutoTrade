@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.api.routes import health, market, strategy, trade
+from app.api.routes import account, health, market, strategy, trade
 from app.core.config import Settings, get_settings
 from app.db import models  # noqa: F401 - 导入模型以注册表结构
 from app.db.session import Base, create_db_engine, create_session_factory
@@ -53,7 +53,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.session_factory = session_factory
 
     market_service = MarketService(settings.market_inst_id_list, settings.market_bar)
-    account_service = AccountService(settings)
+    account_service = AccountService(settings, session_factory)
     okx_client = create_okx_client_from_settings(settings)
     instruments = InstrumentService(okx_client)
     trade_service = TradeService(okx_client, instruments, account_service)
@@ -109,6 +109,7 @@ def create_app() -> FastAPI:
     app.include_router(market.router, prefix=settings.api_prefix)
     app.include_router(trade.router, prefix=settings.api_prefix)
     app.include_router(strategy.router, prefix=settings.api_prefix)
+    app.include_router(account.router, prefix=settings.api_prefix)
     return app
 
 

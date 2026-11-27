@@ -3,19 +3,26 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from app.core.config import Settings
+from app.db.models import EquitySnapshotRow
 from app.exchange.okx_client import create_okx_client_from_settings
 from app.exchange.okx_ws import PRIVATE_SIMULATED_WS_URL, PRIVATE_WS_URL, OkxWsClient
 from app.services.broadcaster import ClientHub
 
 logger = logging.getLogger(__name__)
 
+# 净值快照最小写入间隔，避免私有频道高频推送把表写爆
+EQUITY_INTERVAL_MS = 60_000
+
 
 class AccountService:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, session_factory: Any | None = None) -> None:
         self.settings = settings
+        self.session_factory = session_factory
+        self._last_equity_ts = 0
         self.enabled = settings.okx_has_credentials
         self.positions: dict[str, dict[str, Any]] = {}
         self.orders: dict[str, dict[str, Any]] = {}
@@ -63,6 +70,7 @@ class AccountService:
             balance = await client.get_balance("USDT")
             if balance:
                 self.account = balance[0]
+                self._record_equity()
             self.ready = True
         except Exception as exc:  # noqa: BLE001 - 快照失败不应阻塞启动
             logger.warning("账户初始快照拉取失败: %s", exc)
@@ -110,4 +118,24 @@ class AccountService:
 
         if channel == "account" and data:
             self.account = data[0]
+            self._record_equity()
             await self.hub.broadcast({"type": "account", "data": self.account})
+
+    # ------------------------------------------------------------ 净值快照
+    def _record_equity(self) -> None:
+        """把 totalEq 落库，供前端净值曲线使用；失败只告警，不影响账户推送。"""
+        if self.session_factory is None:
+            return
+        try:
+            total_eq = self.account.get("totalEq")
+            if not total_eq:
+                return
+            now = int(datetime.now(timezone.utc).timestamp() * 1000)
+            if now - self._last_equity_ts < EQUITY_INTERVAL_MS:
+                return
+            self._last_equity_ts = now
+            with self.session_factory() as session:
+                session.add(EquitySnapshotRow(ts=now, total_eq=str(total_eq)))
+                session.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("净值快照写入失败: %s", exc)

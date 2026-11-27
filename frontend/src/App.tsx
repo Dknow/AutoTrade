@@ -5,8 +5,11 @@ import {
   type CandlestickData,
   type IChartApi,
   type ISeriesApi,
+  type SeriesMarker,
   type UTCTimestamp,
 } from "lightweight-charts";
+import { EquityChart, type EquityPoint } from "./components/EquityChart";
+import { OrdersPanel } from "./components/OrdersPanel";
 
 type Ticker = {
   inst_id: string;
@@ -122,6 +125,20 @@ function fmt(value: string | undefined, digits = 2): string {
   return Number.isFinite(num) ? num.toFixed(digits) : "-";
 }
 
+/** 与后端 ema_series 完全一致：首个值为前 period 根的 SMA，之后标准递推。 */
+function emaSeries(values: number[], period: number): (number | null)[] {
+  const result: (number | null)[] = values.map(() => null);
+  if (period <= 0 || values.length < period) return result;
+  const multiplier = 2 / (period + 1);
+  let previous = values.slice(0, period).reduce((sum, item) => sum + item, 0) / period;
+  result[period - 1] = previous;
+  for (let index = period; index < values.length; index += 1) {
+    previous = values[index] * multiplier + previous * (1 - multiplier);
+    result[index] = previous;
+  }
+  return result;
+}
+
 async function postJson<T>(path: string, body: unknown, method = "POST"): Promise<T> {
   const response = await fetch(`/api/v1${path}`, {
     method,
@@ -141,6 +158,9 @@ export default function App() {
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const lastTimeRef = useRef<number>(0);
+  const candlesRef = useRef<CandlestickData<UTCTimestamp>[]>([]);
+  const fastEmaRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const slowEmaRef = useRef<ISeriesApi<"Line"> | null>(null);
 
   const [instId, setInstId] = useState(DEFAULT_INST);
   const [instIds, setInstIds] = useState<string[]>([DEFAULT_INST]);
@@ -176,9 +196,60 @@ export default function App() {
     trailing: true,
   });
   const configInitialized = useRef(false);
+  const strategyRef = useRef<StrategyState | null>(null);
+  const [equity, setEquity] = useState<EquityPoint[]>([]);
+  const [logFilter, setLogFilter] = useState<"all" | "trade" | "stop" | "warn">("all");
 
   const ticker = tickers[instId] ?? null;
   const spec = specs[instId] ?? null;
+
+  /** 刷新图表叠加层：策略 EMA 快慢线 + 开平仓标记（仅当图表标的与策略标的一致）。 */
+  const refreshOverlays = () => {
+    const candles = candlesRef.current;
+    const current = strategyRef.current;
+    const fastLine = fastEmaRef.current;
+    const slowLine = slowEmaRef.current;
+    if (!fastLine || !slowLine) return;
+    if (!current || current.inst_id !== instIdRef.current || candles.length === 0) {
+      fastLine.setData([]);
+      slowLine.setData([]);
+      seriesRef.current?.setMarkers([]);
+      return;
+    }
+
+    const closes = candles.map((candle) => candle.close);
+    const toLine = (values: (number | null)[]) =>
+      candles.flatMap((candle, index) =>
+        values[index] == null ? [] : [{ time: candle.time, value: values[index] as number }],
+      );
+    fastLine.setData(toLine(emaSeries(closes, current.config.fast)));
+    slowLine.setData(toLine(emaSeries(closes, current.config.slow)));
+
+    const markers: SeriesMarker<UTCTimestamp>[] = [];
+    for (const record of current.records) {
+      if (record.event !== "open" && record.event !== "close") continue;
+      const at = Date.parse(record.at) / 1000;
+      if (!Number.isFinite(at)) continue;
+      // 吸附到不晚于事件时间的最后一根 K 线，保证 time 一定在图表数据内
+      let target: UTCTimestamp | null = null;
+      for (const candle of candles) {
+        if (Number(candle.time) <= at) target = candle.time;
+        else break;
+      }
+      if (target == null) continue;
+      const isOpen = record.event === "open";
+      const isLong = record.detail.includes("开多");
+      markers.push({
+        time: target,
+        position: isOpen && isLong ? "belowBar" : "aboveBar",
+        color: !record.ok ? "#f85149" : isOpen ? (isLong ? "#3fb950" : "#f85149") : "#d29922",
+        shape: isOpen ? (isLong ? "arrowUp" : "arrowDown") : "circle",
+        text: isOpen ? (isLong ? "开多" : "开空") : "平仓",
+      });
+    }
+    markers.sort((a, b) => Number(a.time) - Number(b.time));
+    seriesRef.current?.setMarkers(markers.slice(-50));
+  };
 
   const loadStrategy = async () => {
     const [strategyData, riskData] = await Promise.all([
@@ -199,7 +270,32 @@ export default function App() {
 
   useEffect(() => {
     instIdRef.current = instId;
+    refreshOverlays();
   }, [instId]);
+
+  useEffect(() => {
+    strategyRef.current = strategy;
+    refreshOverlays();
+  }, [strategy]);
+
+  // 净值曲线：每 30s 拉一次历史快照
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      fetch("/api/v1/account/equity-history?limit=300")
+        .then((res) => res.json())
+        .then((data: { points?: EquityPoint[] }) => {
+          if (!cancelled) setEquity(data.points ?? []);
+        })
+        .catch(() => undefined);
+    };
+    load();
+    const timer = window.setInterval(load, 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     if (strategy && !configInitialized.current) {
@@ -253,6 +349,20 @@ export default function App() {
 
     chartRef.current = chart;
     seriesRef.current = series;
+    fastEmaRef.current = chart.addLineSeries({
+      color: "#58a6ff",
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    slowEmaRef.current = chart.addLineSeries({
+      color: "#f778ba",
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
 
     const handleResize = () => chart.applyOptions({ width: container.clientWidth });
     window.addEventListener("resize", handleResize);
@@ -261,6 +371,9 @@ export default function App() {
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;
+      fastEmaRef.current = null;
+      slowEmaRef.current = null;
+      candlesRef.current = [];
     };
   }, []);
 
@@ -272,8 +385,10 @@ export default function App() {
       .then((data: { candles?: string[][] }) => {
         if (cancelled) return;
         const candles = (data.candles ?? []).map(toCandle).sort((a, b) => a.time - b.time);
+        candlesRef.current = candles;
         seriesRef.current?.setData(candles);
         lastTimeRef.current = candles.length ? Number(candles[candles.length - 1].time) : 0;
+        refreshOverlays();
       })
       .catch(() => undefined);
     return () => {
@@ -301,8 +416,10 @@ export default function App() {
         if (message.market?.inst_id === instIdRef.current) {
           const rows = message.market?.candles ?? [];
           const data = rows.map(toCandle).sort((a, b) => a.time - b.time);
+          candlesRef.current = data;
           seriesRef.current?.setData(data);
           lastTimeRef.current = data.length ? Number(data[data.length - 1].time) : 0;
+          refreshOverlays();
         }
         setAccountEnabled(Boolean(message.account?.enabled));
         setPositions(message.account?.positions ?? []);
@@ -321,11 +438,17 @@ export default function App() {
         for (const row of (message.data as string[][]) ?? []) {
           const candle = toCandle(row);
           const time = Number(candle.time);
-          if (time >= lastTimeRef.current) {
-            seriesRef.current?.update(candle);
-            lastTimeRef.current = time;
+          if (time < lastTimeRef.current) continue;
+          seriesRef.current?.update(candle);
+          lastTimeRef.current = time;
+          const list = candlesRef.current;
+          if (list.length > 0 && Number(list[list.length - 1].time) === time) {
+            list[list.length - 1] = candle;
+          } else {
+            list.push(candle);
           }
         }
+        refreshOverlays();
         return;
       }
       if (message.type === "positions") {
@@ -734,15 +857,43 @@ export default function App() {
           <div className={strategyNotice.ok ? "notice ok" : "notice err"}>{strategyNotice.text}</div>
         )}
         {strategy && strategy.records.length > 0 && (
-          <div className="records">
-            {strategy.records.slice(0, 12).map((record, index) => (
-              <div className={`record ${record.ok ? "" : "err"}`} key={`${record.at}-${index}`}>
-                <span className="label">{record.at.slice(11, 19)}</span>
-                <span className="event">{record.event}</span>
-                <span>{record.detail}</span>
-              </div>
-            ))}
-          </div>
+          <>
+            <div className="log-filters">
+              {(
+                [
+                  ["all", "全部"],
+                  ["trade", "交易"],
+                  ["stop", "止损"],
+                  ["warn", "告警"],
+                ] as const
+              ).map(([key, text]) => (
+                <button
+                  key={key}
+                  className={`chip ${logFilter === key ? "active" : ""}`}
+                  onClick={() => setLogFilter(key)}
+                >
+                  {text}
+                </button>
+              ))}
+            </div>
+            <div className="records">
+              {strategy.records
+                .filter((record) => {
+                  if (logFilter === "all") return true;
+                  if (logFilter === "trade") return record.event === "open" || record.event === "close";
+                  if (logFilter === "stop") return record.event === "stop" || record.event === "trailing";
+                  return !record.ok || record.event === "error" || record.event === "skip";
+                })
+                .slice(0, 20)
+                .map((record, index) => (
+                  <div className={`record ${record.ok ? "" : "err"}`} key={`${record.at}-${index}`}>
+                    <span className="label">{record.at.slice(11, 19)}</span>
+                    <span className="event">{record.event}</span>
+                    <span>{record.detail}</span>
+                  </div>
+                ))}
+            </div>
+          </>
         )}
       </section>
 
@@ -780,6 +931,14 @@ export default function App() {
           </button>
         </div>
       </section>
+
+      <section className="card">
+        <h2>净值曲线</h2>
+        {equity.length === 0 && <div className="label">暂无净值数据（需配置凭据并等待快照，每分钟一条）。</div>}
+        <EquityChart points={equity} />
+      </section>
+
+      <OrdersPanel />
 
       <section className="card">
         <h2>持仓</h2>
