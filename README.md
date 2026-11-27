@@ -2,7 +2,7 @@
 
 基于 OKX v5 官方接口的 USDT 本位永续合约自动化交易系统（双向持仓模式）。
 
-当前进度：**P5 - 回测引擎**（历史 K 线回测、指标统计、前端回测面板；部署文档待补）。
+当前进度：**P6 - 部署（Docker Compose、Nginx 静态托管、裸机与开机自启说明）已完成**。
 
 ## 技术栈
 
@@ -13,7 +13,7 @@
 | 交易所 | OKX v5 REST（自研签名客户端，无第三方 SDK） |
 | 测试 | pytest + pytest-asyncio |
 
-## 目录结构
+ ## 目录结构
 
 ```
 AutoTrade/
@@ -28,8 +28,9 @@ AutoTrade/
 │   ├── tests/                # 签名/Mock/公共接口/私有接口测试
 │   ├── requirements.txt
 │   └── .env.example
-├── frontend/                 # Vite + React + TS
-├── docker-compose.yml
+├── frontend/                 # Vite + React + TS（含生产 Dockerfile 与 nginx.conf）
+├── backend/Dockerfile        # 后端生产镜像
+├── docker-compose.yml        # 一键部署（后端 + Nginx 静态托管）
 └── README.md
 ```
 
@@ -179,6 +180,74 @@ Resolve-DnsName www.okx.com -Type A | Select-Object -ExpandProperty IPAddress
 
 IP 可能会变化，失效后重新获取即可。
 
+## 部署
+
+### 方式一：Docker Compose（推荐）
+
+前置：Docker Engine 24+ 或 Docker Desktop（自带 Compose v2）。
+
+```powershell
+Copy-Item backend\.env.example backend\.env   # 填入 OKX 凭据，OKX_SIMULATED=true
+docker compose up -d --build
+```
+
+打开 <http://localhost:8080>。后端容器只映射到 `127.0.0.1:8000`（本机调试），前端由 Nginx 托管并同源反代 `/api`（含 WebSocket）。
+
+自检：
+
+```powershell
+curl.exe http://127.0.0.1:8000/api/v1/health
+curl.exe http://127.0.0.1:8000/api/v1/exchange/selfcheck
+```
+
+拓扑：`autotrade-frontend`(8080→80) → `autotrade-backend`(8000)。SQLite 落在命名卷 `autotrade-data`，重建容器不丢数据；后端以非 root 用户运行，并带容器级健康检查。
+
+### 方式二：裸机
+
+后端：
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+前端（构建静态文件后交给 Nginx）：
+
+```powershell
+cd frontend
+npm ci
+npm run build        # 产物在 dist/
+```
+
+Nginx 可直接复用 [frontend/nginx.conf](frontend/nginx.conf)，只需把 `proxy_pass http://backend:8000` 改成 `http://127.0.0.1:8000`。
+
+开机自启：
+
+- Linux：Compose 方式执行 `systemctl enable docker`；裸机方式写 systemd unit 跑 uvicorn；
+- Windows：用 [NSSM](https://nssm.cc/) 注册服务，或用「任务计划程序」开机运行上面的 uvicorn 命令。
+
+### 数据备份与升级
+
+```powershell
+# 备份（卷名默认是 <仓库目录名>_autotrade-data，可用 docker volume ls 确认）
+docker run --rm -v autotrade_autotrade-data:/data -v ${PWD}:/backup alpine tar czf /backup/autotrade-backup.tar.gz -C /data .
+
+# 升级
+git pull
+docker compose up -d --build
+```
+
+注意：SQLite 只允许单实例写入，不要同时起多个后端容器；恢复备份属于全量替换，先停服务并确认目标数据。
+
+### 部署检查清单
+
+- [ ] `backend/.env` 已填好，且 `OKX_SIMULATED=true`；
+- [ ] 后端端口未暴露到公网（仅 127.0.0.1 或内网）；
+- [ ] `/api/v1/exchange/selfcheck` 返回账户与 `posMode=long_short_mode`；
+- [ ] 公网访问已通过反向代理启用 HTTPS（前端才能用 `wss`）；
+- [ ] `restart: unless-stopped` 与 Docker 开机自启已生效；
+- [ ] 数据库已纳入定期备份。
+
 ## 安全约定
 
 1. `.env` 已在 `.gitignore` 中，密钥只允许存在于本地；
@@ -227,4 +296,4 @@ cd frontend; npm run build
 - [x] P3.1 策略增强（多标的行情、移动止损、策略状态持久化）
 - [x] P4 完整可视化界面（EMA 叠加与交易标记、净值曲线、挂单面板、日志筛选）
 - [x] P5 回测引擎（历史 K 线回测、胜率/回撤/盈亏比、逐笔交易、前端回测面板）
-- [ ] P6 部署文档（Docker、前端静态托管、开机自启）
+- [x] P6 部署文档（Docker、前端静态托管、开机自启）

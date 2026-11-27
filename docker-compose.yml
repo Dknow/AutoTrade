@@ -2,24 +2,27 @@ services:
   backend:
     build: ./backend
     container_name: autotrade-backend
+    restart: unless-stopped
     env_file:
       - ./backend/.env
-    ports:
-      - "8000:8000"
+    environment:
+      # 容器内固定用绝对路径，数据落在命名卷里，重建容器不丢
+      DATABASE_URL: sqlite:////app/data/autotrade.db
     volumes:
-      - ./backend/autotrade.db:/app/autotrade.db
+      - autotrade-data:/app/data
+    ports:
+      # 仅本机可访问，需要远程调接口请走 SSH 隧道或前端反代
+      - "127.0.0.1:8000:8000"
 
   frontend:
-    image: node:22-alpine
+    build: ./frontend
     container_name: autotrade-frontend
-    working_dir: /app
-    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
-    environment:
-      VITE_API_TARGET: http://backend:8000
+    restart: unless-stopped
     ports:
-      - "5173:5173"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
+      - "8080:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+
+volumes:
+  autotrade-data:
